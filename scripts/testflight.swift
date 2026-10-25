@@ -118,6 +118,42 @@ func sync(_ appID: String, _ groupID: String, only emails: Set<String>? = nil) {
     if added == 0 { print("Everyone who accepted is already in \(groupName).") }
 }
 
+/// The Developer ID provisioning profile the Mac app needs (iCloud entitlements). Xcode only makes it when you export by
+/// hand; with an API key, xcodebuild can't, so this creates it (or reuses it) and installs it for manual signing.
+func macProfile() {
+    let macID = "com.romadinov.jinnie.mac", profileName = "Jinnie Mac Developer ID"
+    guard let bundle = data(api("GET", "/v1/bundleIds?filter[identifier]=\(macID)&limit=20")).first(where: { attr($0, "identifier") as? String == macID }),
+          let bundleRef = bundle["id"] as? String else { print("✗ No bundle ID \(macID) in your developer account"); exit(1) }
+    let certs = data(api("GET", "/v1/certificates?filter[certificateType]=DEVELOPER_ID_APPLICATION,DEVELOPER_ID_APPLICATION_G2&limit=50"))
+    // The certificate whose private key is on this Mac (matched by serial number).
+    let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    p.arguments = ["-c", "security find-certificate -c 'Developer ID Application' -p | openssl x509 -noout -serial | cut -d= -f2"]
+    let pipe = Pipe(); p.standardOutput = pipe; try! p.run(); p.waitUntilExit()
+    let serial = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    guard let cert = certs.first(where: { (attr($0, "serialNumber") as? String)?.uppercased() == serial }), let certRef = cert["id"] as? String else {
+        print("✗ The Developer ID certificate on this Mac (serial \(serial)) isn't in the account"); exit(1)
+    }
+    var profile = data(api("GET", "/v1/profiles?limit=200"))
+        .first { attr($0, "profileState") as? String == "ACTIVE" && attr($0, "name") as? String == profileName }
+    if profile == nil {
+        let r = api("POST", "/v1/profiles", ["data": ["type": "profiles", "attributes": ["name": profileName, "profileType": "MAC_APP_DIRECT"],
+            "relationships": ["bundleId": ["data": ["type": "bundleIds", "id": bundleRef]],
+                              "certificates": ["data": [["type": "certificates", "id": certRef]]]]]])
+        guard let d = r["data"] as? [String: Any] else { print("✗ Couldn't create the profile: \(r["_error"] ?? r)"); exit(1) }
+        profile = d
+        print("✓ Created the provisioning profile \"\(profileName)\"")
+    }
+    guard let content = profile.flatMap({ attr($0, "profileContent") as? String }).flatMap({ Data(base64Encoded: $0) }),
+          let uuid = profile.flatMap({ attr($0, "uuid") as? String }) else { print("✗ Profile has no content"); exit(1) }
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    for dir in ["Library/Developer/Xcode/UserData/Provisioning Profiles", "Library/MobileDevice/Provisioning Profiles"] {
+        let url = home.appendingPathComponent(dir)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try! content.write(to: url.appendingPathComponent("\(uuid).provisionprofile"))
+    }
+    print("✓ Installed \"\(profileName)\" (\(uuid))")
+}
+
 let args = Array(CommandLine.arguments.dropFirst())
 switch args.first ?? "status" {
 case "setup":
@@ -148,6 +184,10 @@ case "invite":
 case "sync":
     let appID = requireApp()
     sync(appID, group(appID))
+case "mac-profile":
+    macProfile()
+case "profiles":
+    for p in data(api("GET", "/v1/profiles?limit=200")) { print("\(attr(p, "name") ?? "")  \(attr(p, "profileType") ?? "")  \(attr(p, "profileState") ?? "")") }
 case "apps":
     for a in data(api("GET", "/v1/apps?limit=200")) { print("\(attr(a, "bundleId") ?? "?")  \(attr(a, "name") ?? "")") }
 case "status":
@@ -165,5 +205,5 @@ case "status":
     let pending = data(api("GET", "/v1/userInvitations?limit=100")).compactMap { attr($0, "email") as? String }
     if !pending.isEmpty { print("Invited, not accepted yet: \(pending.joined(separator: ", "))") }
 default:
-    print("Commands: setup | apps | invite <email> [\"First Last\"]… | sync | status")
+    print("Commands: setup | apps | mac-profile | invite <email> [\"First Last\"]… | sync | status")
 }

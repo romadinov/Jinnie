@@ -17,11 +17,15 @@ xcodebuild archive -project Jinnie.xcodeproj -scheme JinnieMac -configuration Re
 [ -d "$OUT/Jinnie.xcarchive" ] || { echo "Archive failed"; exit 1; }
 SPARKLE_BIN=$(ls -d build/SourcePackages/artifacts/sparkle/Sparkle/bin)
 
+# Manual signing: xcodebuild can't make the Developer ID profile itself with an API key (iCloud needs one).
+if [ -n "${ASC_KEY_PATH:-}" ]; then swift scripts/testflight.swift mac-profile; fi
 cat > "$OUT/ExportOptions-mac.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>method</key><string>developer-id</string><key>teamID</key><string>$TEAM</string>
-<key>signingStyle</key><string>automatic</string><key>destination</key><string>export</string>
+<key>signingStyle</key><string>manual</string><key>signingCertificate</key><string>Developer ID Application</string>
+<key>provisioningProfiles</key><dict><key>com.romadinov.jinnie.mac</key><string>Jinnie Mac Developer ID</string></dict>
+<key>destination</key><string>export</string>
 </dict></plist>
 PLIST
 echo "▸ Exporting (Developer ID)"
