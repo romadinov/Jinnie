@@ -1,0 +1,407 @@
+import AppKit
+import Carbon.HIToolbox
+import JinnieAgent
+import JinnieCore
+import ServiceManagement
+import Sparkle
+import SwiftUI
+import UniformTypeIdentifiers
+
+@main
+struct JinnieMacApp: App {
+    @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var delegate
+    @State private var model = AppModel.shared
+    @State private var agent = AgentController.shared
+    /// Sparkle: checks the GitHub releases feed daily; updates are EdDSA-signed and notarized.
+    private let updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+
+    var body: some Scene {
+        Window("Jinnie", id: "main") {
+            MacRoot()
+                .environment(model)
+                .environment(agent)
+                .frame(minWidth: 820, minHeight: 520)
+        }
+        .commands {
+            CommandGroup(replacing: .help) {
+                if ImprovementNoteRequest.isAvailable {
+                    Button("Suggest an Improvement…") { ImprovementNoteRequest.shared.start() }.keyboardShortcut("i", modifiers: [.command, .shift])
+                }
+            }
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.checkForUpdates(nil) }
+            }
+            CommandGroup(after: .newItem) {
+                Button("Quick Note…") { CaptureController.shared.show() }.keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("Sync Now") { agent.runNow(force: true) }.keyboardShortcut("r", modifiers: [.command])
+                Button("Import Recording…") {
+                    let panel = NSOpenPanel()
+                    panel.allowedContentTypes = [.audio, .movie]
+                    panel.allowsMultipleSelection = false
+                    if panel.runModal() == .OK, let url = panel.url { MeetingRecorder.shared.importAudio(url) }
+                }
+            }
+        }
+
+        MenuBarExtra {
+            MenuBarContent().environment(model).environment(agent)
+        } label: {
+            Image(systemName: MeetingRecorder.shared.isRecording ? "record.circle" : (agent.isRunning ? "sparkles" : "brain"))
+        }
+
+        Settings {
+            TabView {
+                MacSettings().tabItem { Label("General", systemImage: "gearshape") }
+                SetupView().tabItem { Label("Setup", systemImage: "checklist") }
+            }
+            .environment(model).environment(agent)
+            .frame(width: 680, height: 720)
+        }
+    }
+}
+
+final class MacAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        HotKeys.apply()
+        NSApp.registerForRemoteNotifications()
+        MainActor.assumeIsolated { CrashReporter.shared.start() }
+        Task { @MainActor in AgentController.shared.start() }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
+        Task { await AppModel.shared.sync?.syncNow() }
+    }
+}
+
+// MARK: - Root window
+
+struct MacRoot: View {
+    @Environment(AppModel.self) private var model
+    @Environment(AgentController.self) private var agent
+    @State private var section: Section_? = .today
+    @State private var path = NavigationPath()
+
+    var body: some View {
+        NavigationSplitView {
+            List(Section_.allCases, selection: $section) { s in
+                Label(s.rawValue, systemImage: s.symbol).tag(s)
+                    .badge(s == .questions ? model.openClarifications.count : 0)
+            }
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
+            .safeAreaInset(edge: .bottom) { AgentStatusFooter().padding(10) }
+        } detail: {
+            NavigationStack(path: $path) {
+                (section ?? .today).view.jinnieDestinations()
+            }
+        }
+        .onChange(of: section, initial: true) { path = NavigationPath(); model.cleanUp(); model.place = "Mac › \((section ?? .today).rawValue)" }
+        .sheet(item: Binding(get: { ImprovementNoteRequest.shared.pending }, set: { ImprovementNoteRequest.shared.pending = $0 })) { p in
+            ImprovementNoteView(pending: p) { ImprovementNoteRequest.shared.pending = nil }
+        }
+        .onOpenURL { url in
+            if url.scheme == "jinnie", url.host() == "capture" { CaptureController.shared.show(); return }
+            guard let route = Route(url: url) else { return }
+            if case .action = route { section = .actions } else if case .project = route { section = .projects } else if case .recording = route { section = .recordings }
+            DispatchQueue.main.async { path = NavigationPath(); path.append(route) }
+        }
+        .toolbar {
+            ToolbarItem {
+                Button { withAnimation { model.cleanUp() } } label: { Label("Clean Up", systemImage: "wand.and.sparkles") }
+                    .help("Hide completed and dropped items")
+                    .disabled(model.recentlyClosed.isEmpty)
+            }
+            ToolbarItem {
+                Button { CaptureController.shared.show() } label: { Label("Quick Note", systemImage: "square.and.pencil") }
+            }
+            ToolbarItem {
+                let rec = MeetingRecorder.shared
+                Button { rec.toggle() } label: {
+                    Label(rec.isRecording ? "Stop Recording" : "Record", systemImage: rec.isRecording ? "stop.circle.fill" : "record.circle")
+                        .foregroundStyle(rec.isRecording ? Color.red : Color.primary)
+                }
+                .help(rec.isRecording ? "Stop and transcribe (⌃⌥R)" : "Record a meeting (⌃⌥R)")
+            }
+            ToolbarItem {
+                Button { agent.runNow(force: true) } label: { Label("Sync Now", systemImage: "arrow.triangle.2.circlepath") }
+                    .disabled(agent.isRunning)
+            }
+        }
+    }
+}
+
+struct AgentStatusFooter: View {
+    @Environment(AgentController.self) private var agent
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if agent.isRunning { ProgressView().controlSize(.mini) } else { Image(systemName: "checkmark.circle").foregroundStyle(.green) }
+                Text(agent.isRunning ? agent.current : "Idle").lineLimit(1)
+            }
+            if let last = agent.lastCycle {
+                Text("Last run \(last.formatted(.relative(presentation: .named)))").foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct MenuBarContent: View {
+    @Environment(AppModel.self) private var model
+    @Environment(AgentController.self) private var agent
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Quick Note…  \(HotKeys.captureShortcut?.display ?? "")") { CaptureController.shared.show() }
+        Button("Voice Note…  \(Shortcut.load(HotKeys.voiceKey, default: .voiceDefault)?.display ?? "")") { CaptureController.shared.show(listen: true) }
+        Button(MeetingRecorder.shared.isRecording ? "Stop Recording" : "Record a Meeting  \(Shortcut.load(HotKeys.recordKey, default: .recordDefault)?.display ?? "")") { MeetingRecorder.shared.toggle() }
+        Button("Open Jinnie") { NSApp.activate(); openWindow(id: "main") }
+        Divider()
+        Text(agent.isRunning ? agent.current : "Next: \(model.openNext.count) · Waiting: \(model.openWaiting.count)")
+        Button("Sync Now") { agent.runNow(force: true) }.disabled(agent.isRunning)
+        Divider()
+        if ImprovementNoteRequest.isAvailable {
+            Button("Suggest an Improvement…") { NSApp.activate(); openWindow(id: "main"); ImprovementNoteRequest.shared.start() }
+        }
+        Button("Set Up Jinnie…") { SetupWindow.shared.show() }
+        SettingsLink { Text("Settings…") }
+        Button("Quit Jinnie") { NSApp.terminate(nil) }
+    }
+}
+
+// MARK: - Global capture
+
+enum HotKeys {
+    static let captureKey = "hotkey.capture"
+    static let voiceKey = "hotkey.voice"
+    static let recordKey = "hotkey.record"
+    static var captureShortcut: Shortcut? { Shortcut.load(captureKey, default: .captureDefault) }
+
+    static func apply() {
+        HotKeyCenter.shared.register(id: 1, captureShortcut) { MainActor.assumeIsolated { CaptureController.shared.show() } }
+        // Voice note: Quick Note that starts listening at once. Record: start/stop a meeting recording.
+        HotKeyCenter.shared.register(id: 2, Shortcut.load(voiceKey, default: .voiceDefault)) { MainActor.assumeIsolated { CaptureController.shared.show(listen: true) } }
+        HotKeyCenter.shared.register(id: 3, Shortcut.load(recordKey, default: .recordDefault)) { MainActor.assumeIsolated { MeetingRecorder.shared.toggle() } }
+    }
+}
+
+extension Shortcut {
+    static let captureDefault = Shortcut(keyCode: UInt32(kVK_ANSI_J), carbonModifiers: UInt32(controlKey | optionKey), display: "⌃⌥J")
+    // Not ⌃⌥V: that is Uberdoer's voice entry.
+    static let voiceDefault = Shortcut(keyCode: UInt32(kVK_ANSI_J), carbonModifiers: UInt32(controlKey | optionKey | shiftKey), display: "⌃⌥⇧J")
+    static let recordDefault = Shortcut(keyCode: UInt32(kVK_ANSI_R), carbonModifiers: UInt32(controlKey | optionKey), display: "⌃⌥R")
+}
+
+final class CapturePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) { close() }
+}
+
+/// A Spotlight-like floating panel: opens over any app (all Spaces, full screen) without bringing
+/// the main window forward; ⌘↩ saves, Esc closes, focus returns to the previous app.
+@MainActor
+final class CaptureController {
+    static let shared = CaptureController()
+    private var panel: CapturePanel?
+
+    func show(listen: Bool = false) {
+        if let panel, panel.isVisible {
+            if !listen { panel.makeKeyAndOrderFront(nil); return }
+            panel.close()  // reopen listening
+        }
+        let size = NSSize(width: 560, height: 230)
+        let panel = CapturePanel(contentRect: NSRect(origin: .zero, size: size),
+                                 styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel, .utilityWindow],
+                                 backing: .buffered, defer: false)
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        for b in [NSWindow.ButtonType.miniaturizeButton, .zoomButton, .closeButton] { panel.standardWindowButton(b)?.isHidden = true }
+
+        let root = CaptureForm(listen: listen, onDone: { [weak panel] in panel?.close() })
+            .environment(AppModel.shared)
+            .frame(width: size.width, height: size.height)
+        let controller = NSHostingController(rootView: root)
+        // Fixed size. Letting the panel follow the SwiftUI content's preferred size made AppKit and SwiftUI resize
+        // each other until AppKit raised "too many layout passes" and the app crashed (seen with the TextEditor).
+        controller.sizingOptions = []
+        panel.contentViewController = controller
+        panel.setContentSize(size)
+        if let screen = NSScreen.main {
+            let f = screen.visibleFrame
+            panel.setFrameTopLeftPoint(NSPoint(x: f.midX - panel.frame.width / 2, y: f.maxY - f.height * 0.2))
+        }
+        panel.makeKeyAndOrderFront(nil)
+        self.panel = panel
+    }
+}
+
+struct CaptureForm: View {
+    var listen = false
+    let onDone: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "brain").foregroundStyle(.tint)
+                Text("Jinnie note").font(.headline)
+                Spacer()
+                Text("⌘↩ save · ⌘D dictate · esc close").font(.caption).foregroundStyle(.secondary)
+            }
+            CaptureBox(autofocus: true, editorHeight: 130, listen: listen, onSaved: onDone)
+        }
+        .padding(14)
+        .padding(.top, 14)  // room for the hidden title bar
+    }
+}
+
+// MARK: - Settings
+
+struct MacSettings: View {
+    @Environment(AppModel.self) private var model
+    @Environment(AgentController.self) private var agent
+    @State private var recording = false
+    @State private var shortcut = HotKeys.captureShortcut
+    @State private var recordingVoice = false
+    @State private var voiceShortcut = Shortcut.load(HotKeys.voiceKey, default: .voiceDefault)
+    @State private var recordingRecord = false
+    @State private var recordShortcut = Shortcut.load(HotKeys.recordKey, default: .recordDefault)
+
+    var body: some View {
+        Form {
+            Section("Capture") {
+                LabeledContent("Global shortcut") {
+                    Button(recording ? "Press keys…" : (shortcut?.display ?? "None")) { recording = true }
+                        .background(ShortcutRecorder(active: $recording) { s in
+                            shortcut = s; Shortcut.save(s, HotKeys.captureKey); HotKeys.apply()
+                        })
+                }
+                LabeledContent("Voice note") {
+                    Button(recordingVoice ? "Press keys…" : (voiceShortcut?.display ?? "None")) { recordingVoice = true }
+                        .background(ShortcutRecorder(active: $recordingVoice) { s in
+                            voiceShortcut = s; Shortcut.save(s, HotKeys.voiceKey); HotKeys.apply()
+                        })
+                }
+                LabeledContent("Record a meeting (start/stop)") {
+                    Button(recordingRecord ? "Press keys…" : (recordShortcut?.display ?? "None")) { recordingRecord = true }
+                        .background(ShortcutRecorder(active: $recordingRecord) { s in
+                            recordShortcut = s; Shortcut.save(s, HotKeys.recordKey); HotKeys.apply()
+                        })
+                }
+                Text("Voice notes and recordings are transcribed on this Mac with Whisper (Russian and English); recordings are also separated by speaker, and voices you name are recognised next time.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Meetings") {
+                MeetingSettings()
+            }
+            Section("General") {
+                Toggle("Open at login", isOn: Binding(
+                    get: { SMAppService.mainApp.status == .enabled },
+                    set: { on in
+                        if on { try? SMAppService.mainApp.register() } else { try? SMAppService.mainApp.unregister() }
+                        agent.objectWillChangeHack += 1
+                    }))
+            }
+            Section("Summaries") {
+                Toggle(isOn: Binding(get: { agent.agent.autoSummaries }, set: { agent.agent.autoSummaries = $0; agent.objectWillChangeHack += 1 })) {
+                    VStack(alignment: .leading) {
+                        Text("Keep project summaries up to date")
+                        Text("New project → history scan + summary. New activity → refresh (at most every 2 h). Active projects → daily refresh. Up to 3 per run.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Section("Sources") {
+                ForEach(Source.connectors, id: \.self) { s in
+                    Toggle(isOn: Binding(get: { agent.agent.isEnabled(s) }, set: { agent.agent.setEnabled(s, $0); agent.objectWillChangeHack += 1 })) {
+                        VStack(alignment: .leading) {
+                            Text(s.label)
+                            Text(agent.agent.lastRun(s).map { "Last read \($0.formatted(.relative(presentation: .named)))" } ?? "Not read yet")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                HStack {
+                    Text("Outlook (client Microsoft 365, e.g. Umbrella): read through Jinnie's own browser profile — no clicks, nothing marked as read.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Sign in to Outlook…") { try? OutlookReader().login() }
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("reMarkable: handwritten notebooks are transcribed (Russian and English) within 30 minutes of writing.")
+                    Text(RemarkableReader.missing.isEmpty
+                         ? (RemarkableReader.isSignedIn ? "rmapi is signed in." : "Sign in once: run ~/.local/bin/rmapi in Terminal and enter the code from my.remarkable.com/device/desktop/connect.")
+                         : "Needs \(RemarkableReader.missing.joined(separator: ", ")). See the README → reMarkable.")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                Text("Email and Slack are read every 30 minutes, Drive (meeting transcripts and shared docs) hourly, the calendar every 6 hours, through your claude.ai connectors (Settings → Connectors on claude.ai). Jinnie only ever uses their read tools.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Setup") {
+                LabeledContent("Claude CLI", value: agent.agent.claude.executable)
+                LabeledContent("Uberdoer", value: Uberdoer.isInstalled ? "Connected" : "Not installed")
+                Button("Import projects from Uberdoer") { agent.importProjects() }
+                Button("Learn contacts from the last 6 months of mail") { agent.learnContacts() }.disabled(agent.isRunning)
+                Button("Show agent transcripts") { NSWorkspace.shared.open(agent.agent.claude.tracesDirectory) }
+            }
+        }
+        .formStyle(.grouped)
+        .id(agent.objectWillChangeHack)
+    }
+}
+
+/// Captures the next key combination while `active`.
+struct ShortcutRecorder: NSViewRepresentable {
+    @Binding var active: Bool
+    let onRecord: (Shortcut) -> Void
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.parent = self
+        if active, context.coordinator.monitor == nil {
+            context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+                if e.keyCode == UInt16(kVK_Escape) { context.coordinator.stop(); return nil }
+                if let s = Shortcut(event: e) { context.coordinator.parent.onRecord(s); context.coordinator.stop(); return nil }
+                return e
+            }
+        }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+    final class Coordinator {
+        var parent: ShortcutRecorder
+        var monitor: Any?
+        init(parent: ShortcutRecorder) { self.parent = parent }
+        func stop() {
+            if let m = monitor { NSEvent.removeMonitor(m) }
+            monitor = nil
+            DispatchQueue.main.async { self.parent.active = false }
+        }
+    }
+}
+
+struct MeetingSettings: View {
+    @State private var detector = MeetingDetector.shared
+    @State private var mode = MeetingDetector.shared.mode
+    @State private var calendarOnly = MeetingDetector.shared.calendarOnly
+    @State private var skip = MeetingDetector.shared.skipWords
+
+    var body: some View {
+        Picker("When a call starts (Zoom, Teams, Meet, Webex, Slack, FaceTime)", selection: $mode) {
+            ForEach(MeetingDetector.Mode.allCases) { Text($0.label).tag($0) }
+        }
+        .onChange(of: mode) { _, m in detector.mode = m }
+        Toggle("Only when my calendar shows a meeting", isOn: $calendarOnly)
+            .onChange(of: calendarOnly) { _, v in detector.calendarOnly = v }
+        TextField("Never record meetings whose title contains", text: $skip)
+            .onSubmit { detector.skipWords = skip }
+            .onChange(of: skip) { _, v in detector.skipWords = v }
+        Text("Recordings include the meeting app's audio, so the other participants are captured clearly (macOS asks once for System Audio Recording). Recording stops 30 s after the call ends. Many places require everyone's consent to be recorded: use “Copy notice for others” to tell them.")
+            .font(.caption).foregroundStyle(.secondary)
+    }
+}

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Jinnie records the other participants of meetings you record (only the meeting app's audio) and transcribes them on this Mac.</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/romadinov/Jinnie/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>wOlaEZHfqREGwfQM6CSNzkNOYmfmyHvzQAYY+1+irbc=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSUbiquitousContainers</key>
+	<dict>
+		<key>iCloud.com.romadinov.jinnie</key>
+		<dict>
+			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
+			<true/>
+			<key>NSUbiquitousContainerName</key>
+			<string>Jinnie</string>
+			<key>NSUbiquitousContainerSupportedFolderLevels</key>
+			<string>Any</string>
+		</dict>
+	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Jinnie records voice notes and meetings you start, and transcribes them on this Mac.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Jinnie can use Apple's speech recognition for voice notes while its own Whisper model downloads.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.romadinov.jinnie.open</string>
+			<key>CFBundleURLSchemes</key>
+			<array><string>jinnie</string></array>
+		</dict>
+	</array>
+</dict>
+</plist>

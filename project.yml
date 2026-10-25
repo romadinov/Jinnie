@@ -1,0 +1,118 @@
+name: Jinnie
+options:
+  bundleIdPrefix: com.romadinov
+  deploymentTarget:
+    iOS: "18.0"
+    macOS: "15.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+settings:
+  base:
+    DEVELOPMENT_TEAM: SZVSSCJQFN
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "2"
+    GENERATE_INFOPLIST_FILE: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+packages:
+  JinnieCore:
+    path: Packages/JinnieCore
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit
+    from: 1.1.1
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.10.0
+targets:
+  JinnieMac:
+    type: application
+    platform: macOS
+    sources:
+      - App/Shared
+      - App/macOS
+      - path: App/Assets.xcassets
+    dependencies:
+      - package: JinnieCore
+        product: JinnieCore
+      - package: JinnieCore
+        product: JinnieAgent
+      - package: WhisperKit
+        product: WhisperKit
+      - package: WhisperKit
+        product: SpeakerKit
+      - package: Sparkle
+        product: Sparkle
+      - target: JinnieCLI
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+    settings:
+      base:
+        PRODUCT_NAME: Jinnie
+        PRODUCT_BUNDLE_IDENTIFIER: com.romadinov.jinnie.mac
+        INFOPLIST_FILE: App/macOS/Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: Jinnie
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        CODE_SIGN_ENTITLEMENTS: App/macOS/Jinnie.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+      configs:
+        Release:
+          CODE_SIGN_ENTITLEMENTS: App/macOS/Jinnie-Release.entitlements
+  JinnieCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Packages/JinnieCore/Sources/jinnie
+    dependencies:
+      - package: JinnieCore
+        product: JinnieCore
+      - package: JinnieCore
+        product: JinnieAgent
+    settings:
+      base:
+        PRODUCT_NAME: jinniectl
+        PRODUCT_BUNDLE_IDENTIFIER: com.romadinov.jinnie.cli
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: YES
+        GENERATE_INFOPLIST_FILE: NO
+  JinnieIOS:
+    type: application
+    platform: iOS
+    sources:
+      - App/Shared
+      - App/iOS
+      - path: App/Assets.xcassets
+    dependencies:
+      - package: JinnieCore
+        product: JinnieCore
+      - package: WhisperKit
+        product: WhisperKit
+    settings:
+      base:
+        PRODUCT_NAME: Jinnie
+        PRODUCT_BUNDLE_IDENTIFIER: com.romadinov.jinnie
+        INFOPLIST_KEY_CFBundleDisplayName: Jinnie
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_FILE: App/iOS/Info.plist
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_ENTITLEMENTS: App/iOS/Jinnie.entitlements
+schemes:
+  JinnieMac:
+    build:
+      targets:
+        JinnieMac: all
+    run:
+      config: Debug
+  JinnieIOS:
+    build:
+      targets:
+        JinnieIOS: all
+    run:
+      config: Debug

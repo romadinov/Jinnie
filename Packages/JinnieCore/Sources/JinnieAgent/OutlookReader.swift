@@ -1,0 +1,126 @@
+import Foundation
+import JinnieCore
+
+/// Reads Outlook on the web (a client's Microsoft 365, e.g. Umbrella) through Jinnie's own signed-in browser
+/// profile, for tenants where the Microsoft 365 connector can't be approved and New Outlook can't be scripted.
+///
+/// Read-only by construction: this type only opens URLs, takes accessibility snapshots and scrolls. It never
+/// clicks or types, so it can't send, delete or even mark anything as read. The model never drives the browser;
+/// it only sees the text collected here.
+public struct OutlookReader: Sendable {
+    public static let session = "jinnie-outlook"
+    public var executable: String
+
+    public init() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        executable = ["/opt/homebrew/bin/agent-browser", "/usr/local/bin/agent-browser", "\(home)/.local/bin/agent-browser"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "agent-browser"
+    }
+
+    public static var isInstalled: Bool { FileManager.default.isExecutableFile(atPath: OutlookReader().executable) }
+
+    @discardableResult
+    func browser(_ args: [String], timeout: TimeInterval = 90) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = ["--session", Self.session, "--session-name", Self.session] + args
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        p.environment = env
+        // A file, not a pipe: the first call starts agent-browser's daemon, which would keep a pipe open forever.
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("jinnie-ab-\(UUID().uuidString).txt")
+        FileManager.default.createFile(atPath: file.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close(); try? FileManager.default.removeItem(at: file) }
+        p.standardOutput = handle
+        p.standardError = handle
+        p.standardInput = FileHandle.nullDevice
+        try p.run()
+        let timer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
+        p.waitUntilExit()
+        timer.cancel()
+        if p.terminationReason == .uncaughtSignal { throw ClaudeError(message: "agent-browser timed out: \(args.first ?? "")") }
+        let data = (try? Data(contentsOf: file)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Opens a page and fails clearly if the session needs a new sign-in.
+    func open(_ url: String) throws {
+        try browser(["open", url])
+        try browser(["wait", "4000"])
+        let current = try browser(["get", "url"])
+        if current.contains("login.microsoftonline.com") || current.contains("login.live.com") {
+            throw ClaudeError(message: "Outlook sign-in expired. Run: jinniectl outlook-login (or Settings → Outlook → Sign in).")
+        }
+    }
+
+    /// Opens a visible browser window so the user can sign in (MFA, "stay signed in").
+    public func login() throws {
+        try? browser(["close"])
+        try browser(["--headed", "open", "https://outlook.office.com/mail/"])
+    }
+
+    /// One line per conversation in a mail folder, as Outlook lists it: flags, senders, subject, time, preview.
+    /// Scrolls the virtualised list `pages` times to load older conversations.
+    public func conversations(folder: String = "inbox", pages: Int = 3) throws -> [String] {
+        try open("https://outlook.office.com/mail/\(folder)")
+        var seen: [String] = []
+        var seenSet = Set<String>()
+        for _ in 0..<max(1, pages) {
+            let snap = try browser(["snapshot"])
+            var lastRef: String?
+            for line in snap.split(separator: "\n") where line.contains("- option \"") {
+                guard let text = OutlookReader.quoted(String(line)) else { continue }
+                let clean = OutlookReader.tidy(text)
+                if seenSet.insert(clean).inserted { seen.append(clean) }
+                lastRef = OutlookReader.ref(String(line))
+            }
+            guard let lastRef else { break }
+            let before = seen.count
+            try browser(["scrollintoview", "@\(lastRef)"])
+            try browser(["wait", "1500"])
+            if seen.count == before && pages > 1 { continue }
+        }
+        return seen
+    }
+
+    /// Calendar events as Outlook describes them ("Title, 11:00 AM to 12:00 PM, Tuesday, October 20, 2026, By Organiser,
+    /// Busy, Recurring event"). Outlook on the web ignores dates in calendar URLs, so this reads the month view (the
+    /// whole current month, plus the days of neighbouring months in its grid) and this week's view, without clicking.
+    public func events() throws -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        let dated = #"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [A-Z][a-z]+ \d{1,2}, \d{4}"#
+        for view in ["month", "week"] {
+            try open("https://outlook.office.com/calendar/view/\(view)")
+            let snap = try browser(["snapshot"])
+            for line in snap.split(separator: "\n") where line.contains("- button \"") {
+                guard let text = OutlookReader.quoted(String(line)),
+                      text.range(of: dated, options: .regularExpression) != nil,
+                      !text.hasPrefix("Go to") else { continue }
+                if seen.insert(text).inserted { out.append(text) }
+            }
+        }
+        try? open("https://outlook.office.com/mail/")
+        return out
+    }
+
+    static func quoted(_ line: String) -> String? {
+        guard let a = line.firstIndex(of: "\""), let b = line.lastIndex(of: "\""), a < b else { return nil }
+        return String(line[line.index(after: a)..<b])
+    }
+
+    static func ref(_ line: String) -> String? {
+        guard let r = line.range(of: #"ref=(e\d+)"#, options: .regularExpression) else { return nil }
+        return String(line[r].dropFirst(4))
+    }
+
+    /// Drops Outlook's invisible padding characters and trailing selection text.
+    static func tidy(_ s: String) -> String {
+        s.replacingOccurrences(of: "͏", with: "")
+            .replacingOccurrences(of: "No conversations selected", with: "")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+}
