@@ -61,18 +61,38 @@ extension Agent {
     {"type":"object","required":["result","fact"],"properties":{"result":{"type":"string"},"fact":{"type":"string"}}}
     """
 
-    /// Applies answers given on any device. Each answer also becomes a dated fact from the owner, so summaries cite it.
-    public func applyClarifications() async {
-        for c in store.all(Clarification.self) where c.status == .answered && c.error == nil {
+    /// Applies answers given on any device, up to three at a time (each is a short, independent run), picking up answers
+    /// that arrive meanwhile.
+    public func applyClarifications(maxConcurrent: Int = 3) async {
+        await withTaskGroup(of: Void.self) { group in
+            var running = 0
+            while true {
+                while running < maxConcurrent, let c = claimNextAnswer() {
+                    running += 1
+                    group.addTask {
+                        await self.applyClarification(c)
+                        self.releaseQuestion(c.id)
+                    }
+                }
+                if running == 0 { break }
+                await group.next()
+                running -= 1
+            }
+        }
+    }
+
+    /// The next answered question nobody is applying: claimed in memory and in the database (the CLI shares it).
+    func claimNextAnswer() -> Clarification? {
+        for c in store.all(Clarification.self).sorted(by: { ($0.answeredAt ?? .distantPast) < ($1.answeredAt ?? .distantPast) })
+        where c.status == .answered && c.error == nil {
             guard claimQuestion(c.id) else { continue }
-            defer { releaseQuestion(c.id) }
-            // The app and the CLI share the database: the claim lives there, so only one of them applies an answer.
             guard var fresh = store.get(Clarification.self, c.id), fresh.status == .answered,
-                  fresh.applyingAt.map({ Date().timeIntervalSince($0) > 900 }) ?? true else { continue }
+                  fresh.applyingAt.map({ Date().timeIntervalSince($0) > 900 }) ?? true else { releaseQuestion(c.id); continue }
             fresh.applyingAt = Date()
             store.save(fresh)
-            await applyClarification(fresh)
+            return fresh
         }
+        return nil
     }
 
     func applyClarification(_ c: Clarification) async {
@@ -93,6 +113,7 @@ extension Agent {
         call.allowedTools = Agent.jinnieTools + Agent.jinnieWriteTools
         call.jsonSchema = Agent.clarifyResultSchema
         call.label = "clarify"
+        call.model = Agent.routineModel
         call.timeout = 600
         do {
             let r = try await claude.run(call)

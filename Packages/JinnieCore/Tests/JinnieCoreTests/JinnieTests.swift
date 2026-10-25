@@ -128,12 +128,12 @@ func tempStore() throws -> Store {
     }
     let fresh = project("Learned", summaryAgo: nil)          // first items, never summarised → yes
     let empty = project("Empty", summaryAgo: nil)            // nothing known → no
-    let busy = project("Busy", summaryAgo: 3)                // new item after summary, summary 3h old → yes
-    let recent = project("Recent", summaryAgo: 1)            // new item but summarised 1h ago → wait
-    let stale = project("Stale", summaryAgo: 30)             // no news, but over a day old and active this month → yes
-    let dormant = project("Dormant", summaryAgo: 30)         // last activity 2 months ago → no
+    let busy = project("Busy", summaryAgo: 13)               // new item after summary, summary 13h old → yes
+    let recent = project("Recent", summaryAgo: 5)            // new item but summarised 5h ago → wait (12 h minimum)
+    let stale = project("Stale", summaryAgo: 30)             // no news, but over a day old and active this week → yes
+    let dormant = project("Dormant", summaryAgo: 30)         // last activity 10 days ago → no
     let items = [item(fresh, hoursAgo: 1), item(busy, hoursAgo: 0.5), item(recent, hoursAgo: 0.2),
-                 item(stale, hoursAgo: 48), item(dormant, hoursAgo: 24 * 60)]
+                 item(stale, hoursAgo: 48), item(dormant, hoursAgo: 24 * 10)]
     let due = Agent.projectsNeedingSummary(projects: [fresh, empty, busy, recent, stale, dormant], items: items, actions: [], now: now)
     #expect(due.map(\.name) == ["Busy", "Learned", "Stale"])
 }
@@ -324,4 +324,31 @@ func tempStore() throws -> Store {
     // Only microphone audio (an in-room meeting): no way to tell.
     #expect(Voice.ownerLabel(segments: segs, mic: mic, system: [], sampleRate: sr) == nil)
     #expect(Voice.ownerLabel(segments: segs, mic: mic, system: [Float](repeating: 0, count: 3000), sampleRate: sr) == nil)
+}
+
+@Test func usageIsSummedPerDayAndKind() throws {
+    let store = try tempStore()
+    let day = Date()
+    Usage.record(label: "ingest-email", cost: 0.3, store: store, date: day)
+    Usage.record(label: "ingest-slack", cost: 0.4, store: store, date: day)
+    Usage.record(label: "brief-Acme", cost: 0.25, store: store, date: day)
+    Usage.record(label: "ask", cost: 0.05, store: store, date: day)
+    let log = store.all(RunLog.self).first { $0.kind == "usage" }!
+    let parts = Usage.breakdown(log.message)
+    #expect(abs(parts["Reading sources"]! - 0.7) < 0.001)
+    #expect(abs(parts["Project briefs"]! - 0.25) < 0.001)
+    #expect(abs(Usage.total(log.message) - 1.0) < 0.001)
+    #expect(store.all(RunLog.self).filter { $0.kind == "usage" }.count == 1)
+}
+
+@Test func weekendsReadLessOften() throws {
+    let agent = Agent(store: try tempStore(), jinnieBinary: "/dev/null", log: { _ in })
+    let cal = Calendar.current
+    let saturday = cal.nextDate(after: Date(), matching: DateComponents(hour: 12, weekday: 7), matchingPolicy: .nextTime)!
+    let monday = cal.nextDate(after: saturday, matching: DateComponents(hour: 12, weekday: 2), matchingPolicy: .nextTime)!
+    #expect(agent.interval(for: .email, at: monday) == 3600)
+    #expect(agent.interval(for: .email, at: saturday) == 4 * 3600)
+    #expect(agent.interval(for: .calendar, at: saturday) == 6 * 3600)
+    agent.weekendInterval = 0
+    #expect(agent.interval(for: .email, at: saturday) == 3600)
 }

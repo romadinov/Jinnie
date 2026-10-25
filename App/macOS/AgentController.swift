@@ -25,6 +25,8 @@ final class AgentController {
     private var uberdoerSyncQueued = false
     /// Questions don't wait behind ingest or history scans: they run in their own lane, in parallel.
     private(set) var isAnswering = false
+    /// Answers to Jinnie's open questions: their own lane, so they don't queue behind Ask or each other.
+    private(set) var isApplying = false
 
     private init() {
         let binary = Bundle.main.url(forAuxiliaryExecutable: "jinniectl")?.path
@@ -85,7 +87,7 @@ final class AgentController {
             let m = AppModel.shared
             let pendingNotes = m.notes.contains { $0.processedAt == nil && $0.processError == nil }
             let pendingQuestions = m.questions.contains { $0.answer == nil && $0.error == nil }
-                || m.clarifications.contains { $0.status == .answered && $0.error == nil }
+            if m.clarifications.contains(where: { $0.status == .answered && $0.error == nil }) { self.applyNow() }
             let pendingRecordings = m.recordings.contains { $0.status == .ready && $0.processedAt == nil && !$0.segments.isEmpty }
             let pendingSummaries = m.projects.contains { p in p.summaryRequestedAt.map { $0 > (p.summaryAt ?? .distantPast) } ?? false }
             if pendingQuestions { self.answerNow() }
@@ -103,17 +105,30 @@ final class AgentController {
 
     func answerNow() {
         let m = AppModel.shared
-        guard !isAnswering, m.questions.contains(where: { $0.answer == nil && $0.error == nil })
-            || m.clarifications.contains(where: { $0.status == .answered && $0.error == nil }) else { return }
+        applyNow()
+        guard !isAnswering, m.questions.contains(where: { $0.answer == nil && $0.error == nil }) else { return }
         isAnswering = true
         let agent = self.agent
         Task.detached {
             await agent.answerQuestions()
-            await agent.applyClarifications()  // answers to Jinnie's open questions, from any device
             await MainActor.run {
                 self.isAnswering = false
                 self.syncUberdoerNow()  // tasks Ask just created or completed
                 self.answerNow()  // anything asked meanwhile
+            }
+        }
+    }
+
+    /// Applies answers to open questions as soon as they arrive (from this Mac or the iPhone).
+    func applyNow() {
+        guard !isApplying, AppModel.shared.clarifications.contains(where: { $0.status == .answered && $0.error == nil }) else { return }
+        isApplying = true
+        let agent = self.agent
+        Task.detached {
+            await agent.applyClarifications()
+            await MainActor.run {
+                self.isApplying = false
+                self.applyNow()  // anything answered at the very end
             }
         }
     }

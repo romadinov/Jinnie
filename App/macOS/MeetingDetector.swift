@@ -34,7 +34,11 @@ final class MeetingDetector {
         set { UserDefaults.standard.set(newValue, forKey: "meetings.skip") }
     }
 
-    struct App { let prefix: String; let name: String; let browser: Bool }
+    struct App {
+        let prefix: String; let name: String; let browser: Bool
+        /// WhatsApp, Telegram: no calendar; work or private depends on who's calling.
+        var messenger = false
+    }
     static let apps: [App] = [
         App(prefix: "us.zoom.", name: "Zoom", browser: false),
         App(prefix: "com.microsoft.teams", name: "Teams", browser: false),
@@ -43,6 +47,10 @@ final class MeetingDetector {
         App(prefix: "com.tinyspeck.slackmacgap", name: "Slack", browser: false),
         App(prefix: "com.apple.FaceTime", name: "FaceTime", browser: false),
         App(prefix: "com.apple.avconferenced", name: "FaceTime", browser: false),  // FaceTime's audio runs here
+        App(prefix: "net.whatsapp.", name: "WhatsApp", browser: false, messenger: true),
+        App(prefix: "desktop.WhatsApp", name: "WhatsApp", browser: false, messenger: true),
+        App(prefix: "ru.keepcoder.Telegram", name: "Telegram", browser: false, messenger: true),
+        App(prefix: "org.telegram.desktop", name: "Telegram", browser: false, messenger: true),
         App(prefix: "com.google.Chrome", name: "Chrome", browser: true),
         App(prefix: "com.apple.Safari", name: "Safari", browser: true),
         App(prefix: "com.apple.WebKit", name: "Safari", browser: true),
@@ -62,6 +70,11 @@ final class MeetingDetector {
         let calendarItem: Item?
         /// The app is both listening and playing: a conversation, not just dictation.
         var twoWay = false
+        var isMessenger = false
+        var callerPID: pid_t = 0
+        /// Messenger calls: who's on it, and the work contacts among them.
+        var callerLabel: String?
+        var participants: [Person] = []
     }
 
     private var timer: Timer?
@@ -86,8 +99,13 @@ final class MeetingDetector {
         guard let caller = procs.first(where: { $0.isRunningInput && $0.pid != me && Self.app(for: $0.bundleID) != nil }),
               let app = Self.app(for: caller.bundleID) else { return nil }
         let family = procs.filter { $0.bundleID.hasPrefix(app.prefix) && $0.pid != me }
-        return Detected(appName: app.name, isBrowser: app.browser, inputDevice: caller.inputDevice, processIDs: family.map(\.objectID),
-                        calendarItem: Self.calendarMeeting(), twoWay: family.contains(where: \.isRunningOutput))
+        var d = Detected(appName: app.name, isBrowser: app.browser, inputDevice: caller.inputDevice, processIDs: family.map(\.objectID),
+                         calendarItem: app.messenger ? nil : Self.calendarMeeting(), twoWay: family.contains(where: \.isRunningOutput))
+        d.isMessenger = app.messenger
+        // The UI process (helpers carry audio): the one whose windows show the caller.
+        d.callerPID = NSRunningApplication.runningApplications(withBundleIdentifier: caller.bundleID).first?.processIdentifier
+            ?? NSWorkspace.shared.runningApplications.first { ($0.bundleIdentifier ?? "").hasPrefix(app.prefix) }?.processIdentifier ?? caller.pid
+        return d
     }
 
     func tick() {
@@ -108,6 +126,30 @@ final class MeetingDetector {
         quietSince = nil
         guard !handledCurrentCall, !recorder.isRecording, !recorder.isBusy else { return }
         if call.twoWay { if twoWaySince == nil { twoWaySince = Date() } } else { twoWaySince = nil }
+        if call.isMessenger {
+            // A voice message also uses the mic: a call is listening and playing for a few seconds.
+            guard let since = twoWaySince, Date().timeIntervalSince(since) >= 3 else { return }
+            handledCurrentCall = true
+            if !CallerID.contactsAllowed { Task { _ = await CallerID.requestContacts() } }
+            if !CallerID.accessibilityAllowed { CallerID.requestAccessibility() }
+            let who = CallerID.identify(pid: call.callerPID)
+            var work = call
+            work.callerLabel = who.label
+            work.participants = who.people
+            guard who.isWork else {
+                // Private (or unknown) caller: not recorded unless the user says so.
+                MeetingPrompt.shared.show(.privateCall(work)) { [weak self] record in
+                    guard record, let self else { return }
+                    recorder.start(meeting: work, auto: true)
+                    self.autoStarted = true
+                }
+                return
+            }
+            recorder.start(meeting: work, auto: true)
+            autoStarted = true
+            MeetingPrompt.shared.show(.started(work))
+            return
+        }
         if call.calendarItem == nil {
             // Not in the calendar (or not synced yet): a browser counts once it has been both listening and playing for
             // 15 s (a call, not dictation or a mic test); native call apps only when "calendar only" is off.
@@ -160,7 +202,7 @@ final class MeetingDetector {
 @MainActor
 final class MeetingPrompt {
     static let shared = MeetingPrompt()
-    enum Kind { case ask(MeetingDetector.Detected), started(MeetingDetector.Detected) }
+    enum Kind { case ask(MeetingDetector.Detected), started(MeetingDetector.Detected), privateCall(MeetingDetector.Detected) }
     private var panel: NSPanel?
     private var closeTimer: Timer?
 
@@ -189,7 +231,7 @@ final class MeetingPrompt {
         panel = p
         // Unanswered questions mean "no"; the "recording started" note just goes away.
         let seconds: TimeInterval
-        if case .ask = kind { seconds = 120 } else { seconds = 20 }
+        switch kind { case .ask: seconds = 120; case .started: seconds = 20; case .privateCall: seconds = 25 }
         closeTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { _ in
             MainActor.assumeIsolated { onAnswer?(false); MeetingPrompt.shared.close() }
         }
@@ -209,20 +251,24 @@ struct MeetingPromptView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: isAsk ? "waveform.badge.mic" : "record.circle.fill").foregroundStyle(isAsk ? Color.accentColor : Color.red)
-                Text(isAsk ? "Record this meeting?" : "Jinnie is recording").font(.headline)
+                Image(systemName: isPrivate ? "lock.fill" : (isAsk ? "waveform.badge.mic" : "record.circle.fill"))
+                    .foregroundStyle(isPrivate ? Color.secondary : (isAsk ? Color.accentColor : Color.red))
+                Text(isPrivate ? "Private call: not recording" : (isAsk ? "Record this meeting?" : "Jinnie is recording")).font(.headline)
             }
             Text(subtitle).font(.callout).foregroundStyle(.secondary).lineLimit(2)
             HStack {
-                Button(copied ? "Copied" : "Copy notice for others") {
+                if !isPrivate { Button(copied ? "Copied" : "Copy notice for others") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(MeetingDetector.notice, forType: .string)
                     copied = true
                 }
                 .controlSize(.small)
-                .help("Paste it in the meeting chat so everyone knows they're being recorded")
+                .help("Paste it in the meeting chat so everyone knows they're being recorded") }
                 Spacer()
-                if isAsk {
+                if isPrivate {
+                    Button("Record anyway") { answer(true) }.controlSize(.small)
+                    Button("OK") { answer(false) }.buttonStyle(.borderedProminent).controlSize(.small)
+                } else if isAsk {
                     Button("Not this one") { answer(false) }.controlSize(.small)
                     Button("Record") { answer(true) }.buttonStyle(.borderedProminent).controlSize(.small)
                 } else {
@@ -236,9 +282,11 @@ struct MeetingPromptView: View {
     }
 
     var isAsk: Bool { if case .ask = kind { return true }; return false }
-    var call: MeetingDetector.Detected { switch kind { case .ask(let c), .started(let c): c } }
+    var isPrivate: Bool { if case .privateCall = kind { return true }; return false }
+    var call: MeetingDetector.Detected { switch kind { case .ask(let c), .started(let c), .privateCall(let c): c } }
     var subtitle: String {
-        let what = call.calendarItem?.title ?? "A call"
+        if isPrivate { return "\(call.appName) call with \(call.callerLabel ?? "someone not in your work contacts"): private, so Jinnie isn't recording it." }
+        let what = call.calendarItem?.title ?? call.callerLabel.map { "\(call.appName) call with \($0)" } ?? "A call"
         return "\(what) · \(call.appName). Includes the other participants' audio; transcribed on this Mac."
     }
 }

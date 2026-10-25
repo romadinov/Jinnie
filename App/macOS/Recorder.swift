@@ -79,6 +79,10 @@ final class MeetingRecorder {
             rec.app = meeting.appName
             rec.autoStarted = auto ? true : nil
             if let item = meeting.calendarItem { rec.meetingItemID = item.id; rec.title = item.title }
+            if !meeting.participants.isEmpty {
+                rec.participantIDs = meeting.participants.map(\.id)
+                rec.title = "\(meeting.appName) call with \(meeting.participants.map(\.name).joined(separator: ", "))"
+            } else if let label = meeting.callerLabel { rec.title = "\(meeting.appName) call with \(label)" }
             // The other participants: the meeting app's own audio. If the user hasn't allowed system audio recording,
             // the microphone recording still goes on.
             let tap = SystemAudioTap()
@@ -241,7 +245,20 @@ final class MeetingRecorder {
                     store.save(p)
                 }
             }
-            Voice.identify(&rec.speakers, people: store.all(Person.self), candidates: Set((meeting?.personIDs ?? []) + [me?.id].compactMap { $0 }))
+            Voice.identify(&rec.speakers, people: store.all(Person.self), candidates: Set((meeting?.personIDs ?? []) + (rec.participantIDs ?? []) + [me?.id].compactMap { $0 }))
+            // A one-to-one messenger call: once you are identified, the other voice is the caller. Learn it.
+            if let ids = rec.participantIDs, ids.count == 1, rec.speakers.contains(where: { $0.personID == me?.id }), !rec.speakers.contains(where: { $0.personID == ids[0] }) {
+                let others = rec.speakers.indices.filter { rec.speakers[$0].personID == nil && rec.speakers[$0].talkSeconds >= 3 }
+                if others.count == 1 {
+                    let i = others[0]
+                    rec.speakers[i].personID = ids[0]
+                    rec.speakers[i].namedBy = .voice
+                    if let e = rec.speakers[i].embedding, var p = store.get(Person.self, ids[0]) {
+                        Voice.learn(e, into: &p, recordingID: rec.id, label: rec.speakers[i].label)
+                        store.save(p)
+                    }
+                }
+            }
 
             rec.status = .ready
             rec.error = nil

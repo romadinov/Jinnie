@@ -148,6 +148,24 @@ struct TodayView: View {
                 }
             }
             #endif
+            let problems = model.sourceProblems
+            if !problems.isEmpty {
+                Section {
+                    ForEach(problems, id: \.source) { p in
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(p.source.label) isn't being read").font(.body.weight(.semibold))
+                                Text(p.message).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                            }
+                        } icon: { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                    }
+                    #if os(macOS)
+                    Button("Open Setup…") { SetupWindow.shared.show() }
+                    #else
+                    Text("Fix it on your Mac: Jinnie → Set Up Jinnie.").font(.caption).foregroundStyle(.secondary)
+                    #endif
+                }
+            }
             if !model.openClarifications.isEmpty {
                 Panel(id: "today.questions", title: "Open questions", count: model.openClarifications.count) {
                     ForEach(model.openClarifications.prefix(5)) { ClarificationRow(clarification: $0) }
@@ -732,8 +750,26 @@ struct ActivityView: View {
                 LabeledContent("Pending uploads", value: "\(model.syncStatus.pending)")
                 if let e = model.syncStatus.lastError { Text(e).foregroundStyle(.orange).font(.caption) }
             }
+            let usage = model.runs.filter { $0.kind == "usage" }.sorted { $0.startedAt > $1.startedAt }
+            if !usage.isEmpty {
+                Section {
+                    let today = usage.first { Calendar.current.isDateInToday($0.startedAt) }
+                    let week = usage.filter { $0.startedAt > Date().addingTimeInterval(-7 * 86400) }
+                    LabeledContent("Today", value: String(format: "$%.2f", today.map { Usage.total($0.message) } ?? 0))
+                    if let today, !today.message.isEmpty { Text(today.message).font(.caption).foregroundStyle(.secondary) }
+                    LabeledContent("Last 7 days", value: String(format: "$%.2f", week.map { Usage.total($0.message) }.reduce(0, +)))
+                    ForEach(week.dropFirst(today == nil ? 0 : 1)) { d in
+                        LabeledContent(d.startedAt.formatted(.dateTime.weekday().day().month(.abbreviated)), value: String(format: "$%.2f", Usage.total(d.message)))
+                            .font(.callout)
+                    }
+                } header: {
+                    Text("Usage")
+                } footer: {
+                    Text("Runs use your Claude subscription; amounts are the API-equivalent price, a measure of how much of your plan's limits Jinnie uses.")
+                }
+            }
             Section("Agent runs") {
-                ForEach(model.runs.prefix(100)) { r in
+                ForEach(model.runs.filter { $0.kind != "usage" }.prefix(100)) { r in
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
                             Image(systemName: r.finishedAt == nil ? "clock" : (r.ok ? "checkmark.circle" : "exclamationmark.triangle"))

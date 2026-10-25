@@ -30,6 +30,8 @@ public struct Recording: Entity {
     public var app: String?
     /// Started by meeting detection rather than by hand.
     public var autoStarted: Bool?
+    /// People known to be on the call without a calendar entry (a messenger call's caller).
+    public var participantIDs: [String]?
 
     public init(title: String) { self.title = title }
 

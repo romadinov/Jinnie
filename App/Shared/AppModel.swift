@@ -206,6 +206,17 @@ final class AppModel {
 
     func recording(_ id: String?) -> Recording? { id.flatMap { i in recordings.first { $0.id == i } } }
     /// Recent recordings with someone still to be named.
+    /// Sources whose latest read (in the last two days) failed: a connector signed out in claude.ai, rmapi signed out…
+    var sourceProblems: [(source: Source, message: String)] {
+        let cutoff = Date().addingTimeInterval(-2 * 86400)
+        return Source.connectors.compactMap { s in
+            guard let last = runs.filter({ $0.kind == "ingest:\(s.rawValue)" && $0.finishedAt != nil })
+                .max(by: { $0.startedAt < $1.startedAt }),
+                  !last.ok, last.startedAt > cutoff else { return nil }
+            return (s, last.message)
+        }
+    }
+
     var recordingsToName: [Recording] {
         let cutoff = Date().addingTimeInterval(-14 * 86400)
         return recordings.filter { $0.status == .ready && $0.startedAt > cutoff && !$0.unnamedSpeakers.isEmpty }

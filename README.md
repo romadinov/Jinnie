@@ -14,7 +14,7 @@ It runs on the Claude subscription through headless `claude -p`, so no API key i
    SQLite (~/Library/Application Support/Jinnie) ◄──► CloudKit (iCloud.com.romadinov.jinnie, CKSyncEngine)
         │
         ├─ every 30 min, read-only:
-        │    claude -p + claude.ai connectors: Gmail, Slack (30 min), Drive (1 h), Google Calendar (6 h)
+        │    claude -p + claude.ai connectors: Gmail, Slack, Drive (1 h), Google Calendar (6 h); weekends every 4 h (Settings)
         │    Outlook on the web (client M365, e.g. Umbrella) via agent-browser: open + read, no clicks
         │    reMarkable Cloud via rmapi (find/get only) → rmc → PNG pages → Claude reads the handwriting (30 min)
         │    → structured extraction: items, facts, people, projects, actions, documents, directory updates

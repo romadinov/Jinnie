@@ -148,6 +148,8 @@ case "invite":
 case "sync":
     let appID = requireApp()
     sync(appID, group(appID))
+case "apps":
+    for a in data(api("GET", "/v1/apps?limit=200")) { print("\(attr(a, "bundleId") ?? "?")  \(attr(a, "name") ?? "")") }
 case "status":
     let appID = requireApp()
     print("Builds:")
@@ -163,5 +165,5 @@ case "status":
     let pending = data(api("GET", "/v1/userInvitations?limit=100")).compactMap { attr($0, "email") as? String }
     if !pending.isEmpty { print("Invited, not accepted yet: \(pending.joined(separator: ", "))") }
 default:
-    print("Commands: setup | invite <email> [\"First Last\"]… | sync | status")
+    print("Commands: setup | apps | invite <email> [\"First Last\"]… | sync | status")
 }

@@ -17,6 +17,8 @@ public final class Agent: @unchecked Sendable {
 
     public init(store: Store, claude: Claude = Claude(), jinnieBinary: String, log: @escaping (String) -> Void = { print($0) }) {
         self.store = store
+        var claude = claude
+        claude.onUsage = { [store] label, cost in Usage.record(label: label, cost: cost, store: store) }
         self.claude = claude
         self.jinnieBinary = jinnieBinary
         self.log = log
@@ -24,7 +26,22 @@ public final class Agent: @unchecked Sendable {
 
     // MARK: - Settings (device-local)
 
-    public static let sourceIntervals: [Source: TimeInterval] = [.email: 1800, .slack: 1800, .calendar: 6 * 3600, .drive: 3600, .outlook: 1800, .remarkable: 1800]
+    /// Model for routine work (ingest, notes, answers to open questions, task context, tool discovery).
+    public static let routineModel = "sonnet"
+
+    public static let sourceIntervals: [Source: TimeInterval] = [.email: 3600, .slack: 3600, .calendar: 6 * 3600, .drive: 3600, .outlook: 1800, .remarkable: 1800]
+
+    /// Weekends: connectors are read at most every `weekendInterval` (default 4 hours; 0 = as on weekdays). Little happens,
+    /// and Monday's first run catches up from the last cursor anyway.
+    public var weekendInterval: TimeInterval {
+        get { store.meta("weekendInterval").flatMap(Double.init) ?? 4 * 3600 }
+        set { store.setMeta("weekendInterval", String(newValue)) }
+    }
+
+    public func interval(for source: Source, at date: Date = Date()) -> TimeInterval {
+        let base = Agent.sourceIntervals[source] ?? 1800
+        return Calendar.current.isDateInWeekend(date) ? max(base, weekendInterval) : base
+    }
 
     public func lastRun(_ source: Source) -> Date? {
         store.meta("cursor.\(source.rawValue)").flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
@@ -61,8 +78,9 @@ public final class Agent: @unchecked Sendable {
         }
         await processNotes()
         await processRecordings()
+        if let until = pausedUntil { log("Background reading paused until \(until.formatted(date: .omitted, time: .shortened))"); syncUberdoer(); return }
         for source in Source.connectors where isEnabled(source) {
-            let due = lastRun(source).map { Date().timeIntervalSince($0) >= (Agent.sourceIntervals[source] ?? 1800) - 60 } ?? true
+            let due = lastRun(source).map { Date().timeIntervalSince($0) >= interval(for: source) - 60 } ?? true
             if force || due { await ingest(source) }
         }
         syncUberdoer()
@@ -75,7 +93,7 @@ public final class Agent: @unchecked Sendable {
     }
 
     /// Summaries requested from another device (or never written yet for projects with fresh activity).
-    public enum ScanPolicy: Sendable { case ifOlderThan6h, ifNeverScanned }
+    public enum ScanPolicy: Sendable { case ifOlderThan6h, ifNeverScanned, never }
 
     public var autoSummaries: Bool {
         get { store.meta("autoSummaries") != "0" }
@@ -94,20 +112,33 @@ public final class Agent: @unchecked Sendable {
             guard p.status == .active, let activity = latest[p.id] else { return false }
             guard let at = p.summaryAt else { return true }
             let age = now.timeIntervalSince(at)
-            if activity > at && age > 2 * 3600 { return true }
-            return age > 24 * 3600 && now.timeIntervalSince(activity) < 30 * 86400
+            // Easy on the plan's limits: new activity refreshes at most twice a day; otherwise daily, while active this week.
+            if activity > at && age > 12 * 3600 { return true }
+            return age > 24 * 3600 && now.timeIntervalSince(activity) < 7 * 86400
         }
         .sorted { (latest[$0.id] ?? .distantPast) > (latest[$1.id] ?? .distantPast) }
     }
 
     /// Keeps summaries fresh without being asked. A project seen for the first time gets its history scanned first.
-    public func refreshSummaries(max: Int = 3) async {
+    public func refreshSummaries(max: Int = 1) async {
         guard autoSummaries else { return }
-        let due = Agent.projectsNeedingSummary(projects: store.all(Project.self), items: store.all(Item.self), actions: store.all(Action.self))
+        let items = store.all(Item.self)
+        let due = Agent.projectsNeedingSummary(projects: store.all(Project.self), items: items, actions: store.all(Action.self))
         for p in due.prefix(max) {
             log("Refreshing summary of \(p.name)…")
-            do { try await summarize(projectID: p.id, scan: .ifNeverScanned) } catch { log("Summary for \(p.name) failed: \(error)") }
+            // A history scan costs a lot: only automatically for projects with real recent activity.
+            let recent = items.filter { $0.projectIDs.contains(p.id) && $0.occurredAt > Date().addingTimeInterval(-14 * 86400) }.count
+            let policy: ScanPolicy = recent >= 3 ? .ifNeverScanned : .never
+            do { try await summarize(projectID: p.id, scan: policy) } catch { log("Summary for \(p.name) failed: \(error)") }
         }
+    }
+
+    // MARK: - Pause (limits)
+
+    /// Background reading is paused until this time (the "Pause for today" menu item); notes, questions and Ask still run.
+    public var pausedUntil: Date? {
+        get { store.meta("pausedUntil").flatMap(Double.init).map(Date.init(timeIntervalSince1970:)).flatMap { $0 > Date() ? $0 : nil } }
+        set { store.setMeta("pausedUntil", newValue.map { String($0.timeIntervalSince1970) }) }
     }
 
     public func summarizeRequested() async {
@@ -132,6 +163,9 @@ public final class Agent: @unchecked Sendable {
             }
             let tools = try await tools(for: source)
             guard !tools.isEmpty else {
+                if needsSignIn(source) {
+                    throw ClaudeError(message: "\(source.label) is signed out in claude.ai. Reconnect it in claude.ai → Settings → Connectors, then Jinnie → Settings → Setup → Check connectors.")
+                }
                 throw ClaudeError(message: "No \(source.label) tools available. Connect \(source.label) in claude.ai → Settings → Connectors.")
             }
             let since = lastRun(source).map { $0.addingTimeInterval(-3600) } ?? Date().addingTimeInterval(-Double(backfillDays) * 86400)
@@ -198,6 +232,8 @@ public final class Agent: @unchecked Sendable {
         call.jsonSchema = Prompts.extractionSchema
         call.timeout = timeout
         call.label = label
+        // Routine reads use the cheaper model; history scans keep the default (they decide what a project is about).
+        if !label.hasPrefix("scan-") { call.model = Agent.routineModel }
         if tools.isEmpty { call.strictMCP = true; call.mcpConfig = #"{"mcpServers":{}}"# }
         let result = try await claude.run(call)
         guard result.structured != nil else { throw ClaudeError(message: "No structured output: \(result.text.prefix(300))") }
@@ -443,18 +479,26 @@ public final class Agent: @unchecked Sendable {
 
     /// Read-only tool names of the connector for `source`. Names come from the connector itself
     /// (asked once a day); anything that looks like a write is excluded before Claude ever sees it.
+    /// The connector exists in claude.ai but needs signing in again (from the last tool discovery).
+    public func needsSignIn(_ source: Source) -> Bool { store.meta("tools.\(source.rawValue).auth") == "1" }
+
     public func tools(for source: Source, refresh: Bool = false) async throws -> [String] {
         guard let prefix = Agent.serverPrefixes[source] else { return [] }  // e.g. Outlook: read by OutlookReader, not a connector
         let key = "tools.\(source.rawValue)"
+        // Cached for a day, including "none" (a connector that isn't connected isn't re-checked every cycle).
         if !refresh, let cached = store.meta(key), let at = store.meta(key + ".at").flatMap(Double.init),
-           Date().timeIntervalSince1970 - at < 86400, !cached.isEmpty {
+           Date().timeIntervalSince1970 - at < 86400 {
             return cached.split(separator: ",").map(String.init)
         }
         var call = Claude.Call(prompt: "Use ToolSearch (query \"+\(prefix.dropFirst("mcp__claude_ai_".count).dropLast(2))\", max_results 60; try other queries if needed) to find every deferred tool whose name starts with `\(prefix)`. Return all exact names. Do not call those tools.")
         call.jsonSchema = Prompts.toolDiscoverySchema
+        call.label = "tools-\(source.rawValue)"
+        call.model = Agent.routineModel
         call.timeout = 180
         let r = try await claude.run(call)
         let all = ((r.structured as? [String: Any])?["tools"] as? [String] ?? []).filter { $0.hasPrefix(prefix) }
+        // A connector that is added in claude.ai but signed out (or whose access expired) only offers `authenticate`.
+        store.setMeta(key + ".auth", all.contains { $0.hasSuffix("__authenticate") } ? "1" : nil)
         let readOnly = all.filter { name in
             Agent.isReadOnly(String(name.dropFirst(prefix.count)))
         }

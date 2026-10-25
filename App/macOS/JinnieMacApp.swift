@@ -161,6 +161,17 @@ struct MenuBarContent: View {
         Divider()
         Text(agent.isRunning ? agent.current : "Next: \(model.openNext.count) · Waiting: \(model.openWaiting.count)")
         Button("Sync Now") { agent.runNow(force: true) }.disabled(agent.isRunning)
+        if let until = agent.agent.pausedUntil {
+            Button("Resume Background Reading (paused until \(until.formatted(date: .omitted, time: .shortened)))") {
+                agent.agent.pausedUntil = nil; agent.objectWillChangeHack += 1; agent.runNow(force: false)
+            }
+        } else {
+            Button("Pause Background Reading for Today") {
+                // Until 6:00 tomorrow: saves the plan's limits; notes, open questions and Ask keep working.
+                agent.agent.pausedUntil = Calendar.current.date(bySettingHour: 6, minute: 0, second: 0, of: Date().addingTimeInterval(86400))
+                agent.objectWillChangeHack += 1
+            }
+        }
         Divider()
         if ImprovementNoteRequest.isAvailable {
             Button("Suggest an Improvement…") { NSApp.activate(); openWindow(id: "main"); ImprovementNoteRequest.shared.start() }
@@ -312,7 +323,7 @@ struct MacSettings: View {
                 Toggle(isOn: Binding(get: { agent.agent.autoSummaries }, set: { agent.agent.autoSummaries = $0; agent.objectWillChangeHack += 1 })) {
                     VStack(alignment: .leading) {
                         Text("Keep project summaries up to date")
-                        Text("New project → history scan + summary. New activity → refresh (at most every 2 h). Active projects → daily refresh. Up to 3 per run.")
+                        Text("New project → history scan + summary. New activity → refresh (at most every 12 h). Projects active this week → daily refresh. One per run.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -340,7 +351,13 @@ struct MacSettings: View {
                          : "Needs \(RemarkableReader.missing.joined(separator: ", ")). See the README → reMarkable.")
                 }
                 .font(.caption).foregroundStyle(.secondary)
-                Text("Email and Slack are read every 30 minutes, Drive (meeting transcripts and shared docs) hourly, the calendar every 6 hours, through your claude.ai connectors (Settings → Connectors on claude.ai). Jinnie only ever uses their read tools.")
+                Picker("On weekends", selection: Binding(get: { agent.agent.weekendInterval }, set: { agent.agent.weekendInterval = $0; agent.objectWillChangeHack += 1 })) {
+                    Text("Same as weekdays").tag(TimeInterval(0))
+                    Text("Every 4 hours").tag(TimeInterval(4 * 3600))
+                    Text("Twice a day").tag(TimeInterval(12 * 3600))
+                    Text("Not at all (catch up on Monday)").tag(TimeInterval(72 * 3600))
+                }
+                Text("Email, Slack and Drive are read hourly, the calendar every 6 hours, through your claude.ai connectors (Settings → Connectors on claude.ai). On Saturdays and Sundays less often, as set above; Monday's first read catches up. Jinnie only ever uses their read tools.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Setup") {

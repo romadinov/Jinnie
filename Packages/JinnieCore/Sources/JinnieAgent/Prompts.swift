@@ -18,7 +18,8 @@ enum Prompts {
         - Refer to people by name, or as "they", unless their pronouns are stated in a source; never infer pronouns from a name.
         - Attribute every fact to its source item. Never invent facts, people, emails or dates.
         - Use canonical names from the directory below whenever a mention matches (first names, nicknames, transliterations).
-        - Your MCP tools are deferred: load them with ToolSearch first (e.g. query "+Gmail", "+Slack", "+Calendar", "+jinnie").
+        - Use your tools directly. If a tool you need isn't listed (claude.ai connectors are deferred), load it with ToolSearch \
+          (e.g. query "+Gmail", "+Slack", "+Calendar").
         - "Me", "I", \(names.map { "\"\($0)\"" }.joined(separator: ", ")) all mean \(me.name).
         """
     }

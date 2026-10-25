@@ -96,7 +96,9 @@ public enum Setup {
                 c.detail = "Turned off in Jinnie"
             } else if let tools = try? await agent.tools(for: source, refresh: refresh) {
                 c.status = tools.isEmpty ? .missing : .ok
-                c.detail = tools.isEmpty ? "Not connected in claude.ai. \(why)" : "Connected (\(tools.count) read-only tools)"
+                c.detail = tools.isEmpty
+                    ? (agent.needsSignIn(source) ? "Added in claude.ai, but signed out or access expired. \(why)" : "Not connected in claude.ai. \(why)")
+                    : "Connected (\(tools.count) read-only tools)"
             } else {
                 c.status = .warning
                 c.detail = "Couldn't check (is Claude Code signed in?)"

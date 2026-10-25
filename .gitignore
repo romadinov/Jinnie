@@ -4,3 +4,4 @@ Jinnie.xcodeproj/
 Packages/JinnieCore/.build/
 *.xcuserstate
 .DS_Store
+build-sim/

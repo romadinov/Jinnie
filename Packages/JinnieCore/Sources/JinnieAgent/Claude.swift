@@ -21,6 +21,8 @@ public struct Claude: Sendable {
     public var executable: String
     public var model: String?
     public var workDirectory: URL
+    /// Called after every run with its label and cost (subscription usage, priced as API-equivalent dollars).
+    public var onUsage: (@Sendable (String, Double) -> Void)?
 
     public init(executable: String? = nil, model: String? = nil, workDirectory: URL? = nil) {
         self.executable = executable ?? Claude.locate() ?? "/opt/homebrew/bin/claude"
@@ -52,6 +54,8 @@ public struct Claude: Sendable {
         public var jsonSchema: String?
         public var timeout: TimeInterval = 900
         public var effort: String?
+        /// Overrides the default model for this call ("sonnet" for routine extraction).
+        public var model: String?
         /// Names the transcript file.
         public var label = "run"
 
@@ -66,7 +70,10 @@ public struct Claude: Sendable {
                     // claude.ai connectors attach after start-up, so ToolSearch is how they get loaded.
                     "--tools", call.builtinTools.joined(separator: ",")]
         if !call.allowedTools.isEmpty { args += ["--allowedTools", call.allowedTools.joined(separator: ",")] }
-        if let model { args += ["--model", model] }
+        // Runs that only use Jinnie's own MCP server (strict) don't need ToolSearch: without it the local tools are
+        // loaded up front, which saves a model turn per run. Connector runs keep it (claude.ai connectors are deferred).
+        if call.strictMCP && call.builtinTools == ["ToolSearch"], let i = args.firstIndex(of: "--tools") { args[i + 1] = "" }
+        if let m = call.model ?? model { args += ["--model", m] }
         if let e = call.effort { args += ["--effort", e] }
         if let s = call.systemPrompt { args += ["--append-system-prompt", s] }
         if let schema = call.jsonSchema { args += ["--json-schema", schema] }
@@ -92,6 +99,7 @@ public struct Claude: Sendable {
             throw ClaudeError(message: "claude: \(text.isEmpty ? (obj["subtype"] as? String ?? "error") : text)")
         }
         let denials = (obj["permission_denials"] as? [[String: Any]] ?? []).compactMap { $0["tool_name"] as? String }
+        onUsage?(call.label, obj["total_cost_usd"] as? Double ?? 0)
         return ClaudeResult(text: text,
                             structured: obj["structured_output"],
                             costUSD: obj["total_cost_usd"] as? Double ?? 0,

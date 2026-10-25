@@ -61,6 +61,7 @@ struct SetupView: View {
             Section("Optional") {
                 ForEach(checks.filter { $0.level == .optional }) { c in SetupCheckRow(check: c, toggle: source(for: c)) }
                 VoiceSetupRow()
+                MessengerSetupRow()
             }
             Section {
                 HStack {
@@ -266,5 +267,33 @@ final class SetupWindow {
     /// First launch, or something required is missing.
     func showIfNeeded() {
         if !OwnerProfile.exists || Claude.locate() == nil { show() }
+    }
+}
+
+/// WhatsApp and Telegram calls: work calls are recorded, private ones aren't. Needs Contacts (who is a work contact) and
+/// Accessibility (the caller's name in the call window).
+struct MessengerSetupRow: View {
+    @State private var contacts = CallerID.contactsAllowed
+    @State private var ax = CallerID.accessibilityAllowed
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: contacts && ax ? "checkmark.circle.fill" : "circle.dashed").foregroundStyle(contacts && ax ? .green : .secondary)
+                Text("WhatsApp and Telegram calls").font(.body.weight(.semibold))
+            }
+            Text("Calls with work contacts are recorded like meetings; private calls are not. Jinnie reads the caller's name in the call window and looks it up in your Contacts and its people.")
+                .font(.callout).foregroundStyle(.secondary)
+            HStack {
+                if contacts { Text("Contacts allowed").font(.caption).foregroundStyle(.secondary) }
+                else { Button("Allow Contacts") { Task { contacts = await CallerID.requestContacts() } }.controlSize(.small) }
+                if ax { Text("Accessibility allowed").font(.caption).foregroundStyle(.secondary) }
+                else {
+                    Button("Allow Accessibility") { CallerID.requestAccessibility() }.controlSize(.small)
+                    Button("Check") { ax = CallerID.accessibilityAllowed }.controlSize(.small)
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 }

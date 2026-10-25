@@ -234,6 +234,7 @@ extension Agent {
         call.strictMCP = true
         call.mcpConfig = #"{"mcpServers":{}}"#
         call.label = "enrich-actions"
+        call.model = Agent.routineModel
         call.timeout = 600
         do {
             let r = try await claude.run(call)
@@ -306,6 +307,7 @@ extension Agent {
             + "Now: \(question)\n\nToday is \(Prompts.dayString(Date()))."
         var call = Claude.Call(prompt: prompt)
         call.systemPrompt = Agent.askSystem
+        call.label = "ask"
         call.mcpConfig = jinnieMCPConfig()
         call.allowedTools = tools
         call.timeout = 600
@@ -506,6 +508,7 @@ extension Agent {
         let needsScan = switch scan {
         case .ifOlderThan6h: last.map { Date().timeIntervalSince($0) > 6 * 3600 } ?? true
         case .ifNeverScanned: last == nil
+        case .never: false
         }
         if needsScan {
             do { try await scanProject(projectID) } catch { log("Scan before summary failed: \(error)") }
@@ -514,6 +517,7 @@ extension Agent {
         guard var p = store.get(Project.self, projectID) else { throw ClaudeError(message: "Unknown project") }
         var call = Claude.Call(prompt: "Write the summary for project \"\(p.name)\" (id \(p.id)). Today is \(Prompts.dayString(Date())).")
         call.systemPrompt = Agent.summarySystem
+        call.label = "summary-\(p.name)"
         call.mcpConfig = jinnieMCPConfig()
         call.strictMCP = true
         call.allowedTools = Agent.jinnieTools
