@@ -261,6 +261,42 @@ final class AppModel {
 
     func deleteRecording(_ r: Recording) { store.delete(r) }
 
+    // MARK: Transcript corrections
+
+    func correctLine(_ r: Recording, _ turn: Recording.Turn, to text: String) {
+        guard var fresh = store.get(Recording.self, r.id), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        fresh.setText(of: turn, to: text)
+        store.save(fresh)
+    }
+
+    /// Replaces a misheard word everywhere in this transcript; `remember` applies it to future recordings as well.
+    @discardableResult
+    func replaceInTranscript(_ r: Recording, _ from: String, with to: String, remember: Bool) -> Int {
+        guard var fresh = store.get(Recording.self, r.id) else { return 0 }
+        let n = fresh.replace(from, with: to)
+        var list = (fresh.corrections ?? []).filter { $0.from.lowercased() != from.lowercased() }
+        list.append(TranscriptCorrection(from: from, to: to, remember: remember))
+        fresh.corrections = list
+        store.save(fresh)
+        return n
+    }
+
+    /// Words to fix in every new transcript, from all recordings (newest wins).
+    var rememberedCorrections: [TranscriptCorrection] {
+        var seen = Set<String>()
+        return store.all(Recording.self).sorted { $0.startedAt > $1.startedAt }
+            .flatMap { $0.corrections ?? [] }
+            .filter { $0.remember == true && seen.insert($0.from.lowercased()).inserted }
+    }
+
+    /// The Mac reads the corrected transcript again and updates what Jinnie learned from it.
+    func rereadRecording(_ r: Recording) {
+        guard var fresh = store.get(Recording.self, r.id) else { return }
+        fresh.processedAt = nil
+        store.save(fresh)
+        AgentHooks.shared?.runNow()
+    }
+
     func setStatus(_ a: Action, _ status: Action.Status) {
         var a = a
         a.status = status

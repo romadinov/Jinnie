@@ -352,3 +352,18 @@ func tempStore() throws -> Store {
     agent.weekendInterval = 0
     #expect(agent.interval(for: .email, at: saturday) == 3600)
 }
+
+@Test func transcriptCorrections() {
+    var r = Recording(title: "Call")
+    r.segments = [RecordedSegment(speaker: 0, start: 0, end: 2, text: "Sparky said hi."),
+                  RecordedSegment(speaker: 0, start: 2, end: 4, text: "sparky, and Sparkyness stays."),
+                  RecordedSegment(speaker: 1, start: 4, end: 6, text: "Привет, Иннитек!")]
+    #expect(r.replace("sparky", with: "Initech") == 2)
+    #expect(r.segments[1].text == "Initech, and Sparkyness stays.")
+    #expect(r.replace("Иннитек", with: "Initech") == 1)
+    #expect(r.turns.count == 2)
+    r.setText(of: r.turns[0], to: "Initech said hi, and that's it.")
+    #expect(r.segments.count == 2)
+    #expect(r.segments[0].end == 4)
+    #expect(r.turns[0].text == "Initech said hi, and that's it.")
+}

@@ -32,6 +32,8 @@ public struct Recording: Entity {
     public var autoStarted: Bool?
     /// People known to be on the call without a calendar entry (a messenger call's caller).
     public var participantIDs: [String]?
+    /// Word fixes made by the owner ("Innitek" → "Initech"); remembered ones are applied to every new transcript.
+    public var corrections: [TranscriptCorrection]?
 
     public init(title: String) { self.title = title }
 
@@ -53,21 +55,65 @@ public struct Recording: Entity {
         return p.isMe ? "You" : p.name
     }
 
+    /// Consecutive segments of the same speaker: what the transcript shows as one line.
+    public struct Turn: Hashable, Sendable {
+        public var label: Int?
+        public var start: Double
+        public var text: String
+        /// Indices into `segments`.
+        public var indices: [Int]
+    }
+
+    public var turns: [Turn] {
+        var out: [Turn] = []
+        for i in segments.indices.sorted(by: { segments[$0].start < segments[$1].start }) {
+            let seg = segments[i]
+            if var last = out.last, last.label == seg.speaker {
+                last.text += " " + seg.text
+                last.indices.append(i)
+                out[out.count - 1] = last
+            } else {
+                out.append(Turn(label: seg.speaker, start: seg.start, text: seg.text, indices: [i]))
+            }
+        }
+        return out.filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
     /// Consecutive segments of the same speaker merged into turns, with times: "[03:12] Dana Fischer: …".
     public func transcript(_ dir: Directory) -> String {
-        var lines: [String] = []
-        var current: (label: Int?, start: Double, text: String)?
-        func flush() {
-            guard let c = current, !c.text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-            lines.append("[\(Recording.clock(c.start))] \(name(of: c.label, in: dir)): \(c.text.trimmingCharacters(in: .whitespaces))")
+        turns.map { "[\(Recording.clock($0.start))] \(name(of: $0.label, in: dir)): \($0.text.trimmingCharacters(in: .whitespaces))" }
+            .joined(separator: "\n")
+    }
+
+    /// Replaces one line's text: its first segment takes the new text (and the whole time span), the rest go.
+    public mutating func setText(of turn: Turn, to text: String) {
+        guard let first = turn.indices.first, segments.indices.contains(first) else { return }
+        let end = turn.indices.compactMap { segments.indices.contains($0) ? segments[$0].end : nil }.max() ?? segments[first].end
+        segments[first].text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        segments[first].end = end
+        for i in turn.indices.dropFirst().sorted(by: >) where segments.indices.contains(i) { segments.remove(at: i) }
+    }
+
+    /// Replaces a word or phrase everywhere in the transcript (whole words, any case). Returns how many were replaced.
+    @discardableResult
+    public mutating func replace(_ from: String, with to: String) -> Int {
+        var count = 0
+        for i in segments.indices {
+            let (text, n) = Recording.replacing(segments[i].text, from, to)
+            segments[i].text = text
+            count += n
         }
-        for seg in segments.sorted(by: { $0.start < $1.start }) {
-            if let c = current, c.label == seg.speaker { current?.text = c.text + " " + seg.text; continue }
-            flush()
-            current = (seg.speaker, seg.start, seg.text)
-        }
-        flush()
-        return lines.joined(separator: "\n")
+        return count
+    }
+
+    public static func replacing(_ text: String, _ from: String, _ to: String) -> (String, Int) {
+        let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: from.trimmingCharacters(in: .whitespaces)) + "(?![\\p{L}\\p{N}])"
+        guard !from.trimmingCharacters(in: .whitespaces).isEmpty,
+              let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return (text, 0) }
+        let range = NSRange(text.startIndex..., in: text)
+        let n = re.numberOfMatches(in: text, range: range)
+        guard n > 0 else { return (text, 0) }
+        return (re.stringByReplacingMatches(in: text, range: range, withTemplate: NSRegularExpression.escapedTemplate(for: to)), n)
     }
 
     public static func clock(_ seconds: Double) -> String {
@@ -98,6 +144,14 @@ public struct RecordedSpeaker: Codable, Hashable, Sendable {
     public enum NamedBy: String, Codable, Sendable { case voice, owner }
 
     public init(label: Int) { self.label = label }
+}
+
+public struct TranscriptCorrection: Codable, Hashable, Sendable {
+    public var from: String
+    public var to: String
+    /// Apply to future transcripts too.
+    public var remember: Bool?
+    public init(from: String, to: String, remember: Bool) { self.from = from; self.to = to; self.remember = remember }
 }
 
 public struct RecordedSegment: Codable, Hashable, Sendable {

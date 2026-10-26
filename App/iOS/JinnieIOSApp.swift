@@ -85,7 +85,7 @@ struct IOSRoot: View {
 
 struct AddNoteIntent: AppIntent {
     static let title: LocalizedStringResource = "Add Jinnie Note"
-    static let description = IntentDescription("Saves a note to Jinnie. Your Mac links it to projects, people and actions.")
+    static let description = IntentDescription("Saves a note to Jinnie, which links it to projects, people and actions.")
     static let openAppWhenRun = false
 
     @Parameter(title: "Note", inputOptions: String.IntentInputOptions(multiline: true))

@@ -226,6 +226,7 @@ final class MeetingRecorder {
                     RecordedSegment(speaker: nil, start: Double($0.start), end: Double($0.end), text: WhisperModel.clean($0.text))
                 }
             }
+            for c in AppModel.shared.rememberedCorrections { rec.replace(c.from, with: c.to) }
             rec.speakers = Self.speakers(from: rec.segments, diarization: diarization, keeping: rec.speakers)
 
             // Name voices Jinnie knows; meeting attendees are the likely ones.

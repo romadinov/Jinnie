@@ -97,11 +97,7 @@ struct RecordingDetail: View {
                     }
                 }
                 Panel(id: "recording.transcript", title: "Transcript") {
-                    let text = r.transcript(model.directory)
-                    if text.isEmpty { Text(r.status == .ready ? "No speech found." : "Not transcribed yet.").foregroundStyle(.secondary) }
-                    ForEach(Array(text.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                        Text(line).font(.callout).textSelection(.enabled)
-                    }
+                    TranscriptEditor(recording: r)
                 }
             }
             .navigationTitle("Recording")
@@ -264,6 +260,89 @@ struct VoicePanel: View {
                         .confirmationDialog("Forget this voice?", isPresented: $confirmForget) {
                             Button("Forget voice", role: .destructive) { model.forgetVoice(person) }
                         } message: { Text("Recordings keep their names; new ones won't recognise this voice until you name it again.") }
+                }
+            }
+        }
+    }
+}
+
+/// The transcript, correctable: click a line to fix it, or replace a misheard word everywhere (and in future
+/// recordings). After corrections, Jinnie reads the transcript again.
+struct TranscriptEditor: View {
+    @Environment(AppModel.self) private var model
+    let recording: Recording
+    @State private var editing: Int?
+    @State private var draft = ""
+    @State private var replacing = false
+    @State private var from = ""
+    @State private var to = ""
+    @State private var remember = true
+    @State private var changed = false
+    @State private var note: String?
+
+    var body: some View {
+        let r = recording
+        let turns = r.turns
+        if turns.isEmpty {
+            Text(r.status == .ready ? "No speech found." : "Not transcribed yet.").foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Button { replacing.toggle() } label: { Label("Replace a Word…", systemImage: "character.cursor.ibeam") }
+                        .buttonStyle(.borderless)
+                    Spacer()
+                    if changed {
+                        Button("Update What Jinnie Learned") { model.rereadRecording(r); changed = false; note = "Jinnie will read the corrected transcript again." }
+                            .buttonStyle(.borderedProminent).controlSize(.small)
+                    }
+                }
+                if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
+                if replacing {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            TextField("Heard as", text: $from).textFieldStyle(.roundedBorder)
+                            Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                            TextField("Should be", text: $to).textFieldStyle(.roundedBorder)
+                        }
+                        Toggle("Also fix it in future recordings", isOn: $remember)
+                        HStack {
+                            Spacer()
+                            Button("Cancel") { replacing = false }
+                            Button("Replace") {
+                                let n = model.replaceInTranscript(r, from, with: to, remember: remember)
+                                note = n == 0 ? "\"\(from)\" isn't in this transcript\(remember ? "; future recordings will still be fixed" : "")."
+                                    : "Replaced \(n) time\(n == 1 ? "" : "s")."
+                                if n > 0 { changed = true }
+                                replacing = false; from = ""; to = ""
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(from.trimmingCharacters(in: .whitespaces).isEmpty || to.trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+                }
+                ForEach(Array(turns.enumerated()), id: \.offset) { i, turn in
+                    let who = r.name(of: turn.label, in: model.directory)
+                    if editing == i {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("[\(Recording.clock(turn.start))] \(who)").font(.caption).foregroundStyle(.secondary)
+                            TextField("", text: $draft, axis: .vertical).lineLimit(2...12).textFieldStyle(.roundedBorder)
+                            HStack {
+                                Spacer()
+                                Button("Cancel") { editing = nil }
+                                Button("Save") { model.correctLine(r, turn, to: draft); editing = nil; changed = true; note = nil }
+                                    .buttonStyle(.borderedProminent)
+                            }
+                        }
+                    } else {
+                        Text("[\(Recording.clock(turn.start))] \(who): \(turn.text)")
+                            .font(.callout)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture { draft = turn.text; editing = i }
+                            .help("Click to correct this line")
+                    }
                 }
             }
         }
