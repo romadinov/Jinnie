@@ -61,7 +61,10 @@ final class WhisperModel {
                     }
                 }
                 status = .loading
-                let k = try await WhisperKit(WhisperKitConfig(modelFolder: folder!.path, verbose: false, logLevel: .error,
+                // The tokenizer goes in Jinnie's folder too: WhisperKit's default is ~/Documents/huggingface, and reading
+                // Documents makes macOS ask for permission, which stalls transcription until answered.
+                try FileManager.default.createDirectory(at: Self.downloadBase, withIntermediateDirectories: true)
+                let k = try await WhisperKit(WhisperKitConfig(modelFolder: folder!.path, tokenizerFolder: Self.downloadBase, verbose: false, logLevel: .error,
                                                               prewarm: false, load: true, download: false))
                 kit = k
                 status = .ready

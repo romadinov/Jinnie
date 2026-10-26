@@ -88,13 +88,30 @@ final class MeetingDetector {
     func start() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            MainActor.assumeIsolated { MeetingDetector.shared.tick() }
+            MainActor.assumeIsolated { MeetingDetector.shared.poll() }
+        }
+    }
+
+    private var polling = false
+
+    /// Core Audio is asked off the main thread: each query is a round trip to coreaudiod (tens of milliseconds, longer
+    /// when it is busy), which would make the window stutter or freeze.
+    private func poll() {
+        guard mode != .off, !polling else { return }
+        polling = true
+        DispatchQueue.global(qos: .utility).async {
+            let procs = AudioProcess.all()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    MeetingDetector.shared.polling = false
+                    MeetingDetector.shared.tick(procs)
+                }
+            }
         }
     }
 
     /// The call going on right now, if any (also used when you press Record yourself, to include the other participants).
-    func activeMeeting() -> Detected? {
-        let procs = AudioProcess.all()
+    func activeMeeting(_ procs: [AudioProcess] = AudioProcess.all()) -> Detected? {
         let me = getpid()
         guard let caller = procs.first(where: { $0.isRunningInput && $0.pid != me && Self.app(for: $0.bundleID) != nil }),
               let app = Self.app(for: caller.bundleID) else { return nil }
@@ -108,10 +125,10 @@ final class MeetingDetector {
         return d
     }
 
-    func tick() {
+    func tick(_ procs: [AudioProcess]) {
         let recorder = MeetingRecorder.shared
         guard mode != .off else { return }
-        guard let call = activeMeeting() else {
+        guard let call = activeMeeting(procs) else {
             activeSince = nil
             twoWaySince = nil
             if quietSince == nil { quietSince = Date() }

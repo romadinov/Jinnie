@@ -558,6 +558,7 @@ struct ClarificationRow: View {
     let clarification: Clarification
     var showProject = true
     @State private var text = ""
+    @State private var changing = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -590,8 +591,25 @@ struct ClarificationRow: View {
                             .onSubmit(send)
                         Button("Answer", action: send).buttonStyle(.borderedProminent).controlSize(.small).disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
+                } else if changing {
+                    HStack(spacing: 6) {
+                        TextField("Correct answer…", text: $text, axis: .vertical)
+                            .lineLimit(1...4)
+                            .textFieldStyle(.roundedBorder)
+                            .focused($focused)
+                            .keyboardDoneButton()
+                            .onSubmit(sendChange)
+                        Button("Cancel") { changing = false; text = "" }.controlSize(.small)
+                        Button("Change", action: sendChange).buttonStyle(.borderedProminent).controlSize(.small)
+                            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
                 } else if let a = c.answer {
-                    Text("You: \(a)").font(.callout)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("You: \(a)").font(.callout)
+                        Spacer(minLength: 4)
+                        Button("Change answer…") { text = a; changing = true; focused = true }
+                            .buttonStyle(.borderless).font(.caption)
+                    }
                     if let e = c.error {
                         HStack {
                             Text(e).font(.caption).foregroundStyle(.orange).lineLimit(2)
@@ -612,6 +630,13 @@ struct ClarificationRow: View {
     func send() {
         model.answer(clarification, text)
         text = ""
+        focused = false
+    }
+
+    func sendChange() {
+        model.changeAnswer(clarification, text)
+        text = ""
+        changing = false
         focused = false
     }
 

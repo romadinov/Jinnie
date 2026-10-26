@@ -178,6 +178,8 @@ struct TodayView: View {
                 Panel(id: "today.recordings", title: "Who was speaking?", count: model.recordingsToName.count) {
                     ForEach(model.recordingsToName.prefix(5)) { r in
                         NavigationLink(value: Route.recording(r.id)) { RecordingRow(recording: r) }
+                        // Name them right here: play a sample, pick who it is.
+                        ForEach(r.unnamedSpeakers, id: \.label) { s in SpeakerRow(recording: r, speaker: s).padding(.leading, 20) }
                     }
                 }
             }

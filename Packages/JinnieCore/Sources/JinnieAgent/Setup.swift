@@ -15,6 +15,16 @@ public struct SetupCheck: Identifiable, Sendable {
     /// How to fix it, step by step.
     public var steps: [Step] = []
 
+    /// The CLI as it can be typed in Terminal: it lives inside Jinnie.app, which doesn't put it on the PATH
+    /// unless it was installed (Jinnie → Install Command-Line Tool…).
+    public static var jinniectl: String {
+        if FileManager.default.fileExists(atPath: "/usr/local/bin/jinniectl") { return "jinniectl" }
+        let app = Bundle.main.bundleURL
+        let path = app.pathExtension == "app" ? app.appendingPathComponent("Contents/MacOS/jinniectl").path
+            : URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path
+        return path.contains(" ") ? "'\(path)'" : path
+    }
+
     public init(id: String, title: String, level: Level, status: Status, detail: String, steps: [Step] = []) {
         self.id = id; self.title = title; self.level = level; self.status = status; self.detail = detail; self.steps = steps
     }
@@ -128,15 +138,16 @@ public enum Setup {
             c.status = enabled ? .missing : .ok
             c.detail = enabled ? "Turned on, but agent-browser isn't installed" : "Off. For a client mailbox you can't connect to claude.ai (e.g. a customer's Microsoft 365)."
             c.steps = [.init("Install the browser Jinnie reads it with (needs Node.js):", command: "npm i -g agent-browser && agent-browser install"),
-                       .init("Then turn Outlook on and sign in once (Settings → Sources → Sign in to Outlook…).")]
+                       .init("Then turn Outlook on and sign in once (the Sign In button here).")]
             return c
         }
         if !enabled { c.detail = "Off. Turn it on to read a client's Outlook mailbox and calendar."; return c }
         let failed = agent.store.all(RunLog.self).filter { $0.kind == "ingest:outlook" }.max { $0.startedAt < $1.startedAt }
-        if let f = failed, !f.ok {
+        let signedIn = agent.store.meta("outlook.signedInAt").flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
+        if let f = failed, !f.ok, signedIn.map({ f.startedAt > $0 }) ?? true {
             c.status = .warning
             c.detail = f.message
-            c.steps = [.init("Sign in again and choose \"Stay signed in\":", command: "jinniectl outlook-login")]
+            c.steps = [.init("Sign in again with the button below and choose \"Stay signed in\".")]
         } else {
             c.detail = agent.lastRun(.outlook).map { "Read \($0.formatted(.relative(presentation: .named)))" } ?? "On; not read yet"
         }

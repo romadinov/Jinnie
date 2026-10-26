@@ -37,6 +37,12 @@ public struct Recording: Entity {
 
     public var searchText: String { ([title] + segments.map(\.text)).joined(separator: " ") }
 
+    /// Start times of a speaker's longest stretches (at least 2 s, in order of length), for playing their voice.
+    public func sampleTimes(for label: Int, max: Int = 5) -> [Double] {
+        let mine = segments.filter { $0.speaker == label && $0.end - $0.start >= 2 }.sorted { $0.end - $0.start > $1.end - $1.start }
+        return Array(mine.prefix(max).map(\.start))
+    }
+
     public func speaker(_ label: Int?) -> RecordedSpeaker? { label.flatMap { l in speakers.first { $0.label == l } } }
     public var unnamedSpeakers: [RecordedSpeaker] { speakers.filter { $0.personID == nil && $0.talkSeconds >= 3 } }
 

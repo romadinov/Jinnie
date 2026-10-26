@@ -174,22 +174,35 @@ enum Prompts {
         """
     }
 
-    static func drive(since: Date, knownRefs: [String]) -> String {
+    static func driveList(since: Date) -> String {
         """
-        Look through the owner's Google Drive for files created or modified since \(isoString(since)) (use the Drive search \
-        tools with a modified-time filter; include files shared with the owner).
-        1. MEETING TRANSCRIPTS AND NOTES are the priority: Google Meet transcripts ("… - Transcript", usually in "Meet Recordings"), \
-           Gemini "Notes by Gemini" docs, and any other meeting notes. Read each one fully. Return one item per meeting \
-           (sourceRef = file id, url = the file's web link, title = meeting name, occurredAt = meeting time, author = organiser, \
-           people = participants, facts = decisions, numbers, dates, risks and opinions worth remembering, attributed by name). \
-           Extract commitments carefully: what the owner agreed to do → next actions; what others agreed to deliver to the owner \
-           → waiting actions with that person, due dates as stated. documents = the file itself (kind "transcript" or "meeting notes").
-        2. OTHER DOCUMENTS that concern the owner's projects (SOWs, proposals, designs, plans, estimates, contracts, decks, \
-           spreadsheets): read enough to summarise them. One item per document (sourceRef = file id, url = web link, \
-           summary = what it is and its current state, facts = key figures/dates/decisions, documents = the file itself with its kind). \
-           Do not extract actions from documents unless they clearly assign something to the owner or someone owes the owner something.
-        Skip personal files, images, auto-generated exports and anything unrelated to work or the owner's commitments.
-        Already ingested (skip unless modified since \(isoString(since))): \(knownRefs.prefix(150).joined(separator: ", "))
+        List every file in the owner's Google Drive (including files shared with them) modified since \(isoString(since)). \
+        Use the Drive search tool with the query "modifiedTime > '\(isoString(since))'" and excludeContentSnippets, and keep \
+        requesting the next page (pageToken, copied exactly; pageSize 30 so each page fits) until a response has no next page token. Do not open or read any \
+        file and do not repeat the list: Jinnie reads the search results directly. Return pages = how many pages you fetched.
+        """
+    }
+
+    static let driveListSchema = #"{"type":"object","required":["pages"],"properties":{"pages":{"type":"integer"}}}"#
+
+    static func driveRead(_ files: [Agent.DriveFile]) -> String {
+        let list = files.map { "- \($0.title) · \($0.kind) · modified \($0.modifiedTime) · id \($0.id)\($0.url.map { " · " + $0 } ?? "")" }
+            .joined(separator: "\n")
+        return """
+        Open and read EACH of these Google Drive files (read the file content tool; one call per file), then decide what \
+        concerns the owner's work. Do not skip a file because of its title: titles of decks and spreadsheets rarely say \
+        what they are. Don't look for other files.
+        \(list)
+        - MEETING TRANSCRIPTS AND NOTES (Meet transcripts, "Notes by Gemini", other meeting notes): one item per meeting \
+          (sourceRef = file id, url = the file's link, title = meeting name, occurredAt = meeting time, author = organiser, \
+          people = participants, facts = decisions, numbers, dates, risks and opinions worth remembering, attributed by name). \
+          Extract commitments carefully: what the owner agreed to do → next actions; what others agreed to deliver to the \
+          owner → waiting actions with that person, due dates as stated. documents = the file itself (kind "transcript" or "meeting notes").
+        - DECKS, SPREADSHEETS AND OTHER DOCUMENTS about the owner's work and projects: one item each (sourceRef = file id, \
+          url = link, occurredAt = modified time, summary = what it is and its current state, facts = key figures/dates/decisions, \
+          documents = the file itself with its kind). Do not extract actions from them unless they clearly assign something \
+          to the owner or someone owes the owner something.
+        Return nothing for personal files, auto-generated exports and anything unrelated to work.
         """
     }
 

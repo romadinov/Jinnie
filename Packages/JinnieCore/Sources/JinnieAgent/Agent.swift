@@ -169,13 +169,22 @@ public final class Agent: @unchecked Sendable {
                 throw ClaudeError(message: "No \(source.label) tools available. Connect \(source.label) in claude.ai → Settings → Connectors.")
             }
             let since = lastRun(source).map { $0.addingTimeInterval(-3600) } ?? Date().addingTimeInterval(-Double(backfillDays) * 86400)
+            if source == .drive {
+                log("Ingesting Drive since \(Prompts.isoString(since))…")
+                let r = try await ingestDrive(since: since, tools: tools)
+                setLastRun(source, started)
+                run.message = "\(r.stats.description) · read \(r.files) files\(r.left > 0 ? ", \(r.left) left for the next sync" : "") · $\(String(format: "%.2f", r.cost))"
+                log("Drive: \(run.message)")
+                run.finishedAt = Date()
+                store.save(run)
+                return
+            }
             let known = recentRefs(source, days: 3)
             let fetch: String
             switch source {
             case .email: fetch = Prompts.email(since: since, knownRefs: known)
             case .slack: fetch = Prompts.slack(since: since, knownRefs: known)
             case .calendar: fetch = Prompts.calendar(from: Date().addingTimeInterval(-86400 * 2), to: Date().addingTimeInterval(86400 * 7))
-            case .drive: fetch = Prompts.drive(since: since, knownRefs: known)
             default: return
             }
             log("Ingesting \(source.label) since \(Prompts.isoString(since))…")

@@ -93,8 +93,13 @@ case "uberdoer":
     if rest.contains("--enrich") { await agent.enrichActions(limit: 200) }
     agent.syncUberdoer(); done()
 case "outlook-login":
-    do { try OutlookReader().login(); print("A browser window is open: sign in to Outlook, choose 'Stay signed in', then close nothing — Jinnie reuses the session.") }
-    catch { print("Failed: \(error)") }
+    do {
+        let r = OutlookReader()
+        try r.login()
+        print("A browser window is open: sign in to Outlook and choose 'Stay signed in'. Then press Return here (leave the window open).")
+        _ = readLine()
+        print(try r.finishLogin() ? "Signed in. Jinnie reads Outlook on its next sync." : "Still not signed in. Run this again.")
+    } catch { print("Failed: \(error)") }
     exit(0)
 case "outlook-peek":
     do {

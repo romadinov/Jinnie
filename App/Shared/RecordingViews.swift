@@ -117,6 +117,7 @@ struct SpeakerRow: View {
     let recording: Recording
     let speaker: RecordedSpeaker
     @State private var choosing = false
+    @State private var sampleIndex = 0
 
     var body: some View {
         let person = model.person(speaker.personID)
@@ -131,9 +132,15 @@ struct SpeakerRow: View {
                 Spacer()
                 Text(Recording.clock(speaker.talkSeconds)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 #if os(macOS)
-                if let at = speaker.sampleAt, SnippetPlayer.shared.canPlay(recording) {
-                    Button { SnippetPlayer.shared.play(recording, at: at) } label: { Image(systemName: "play.circle") }
-                        .buttonStyle(.borderless).help("Play a few seconds of this voice")
+                let times = recording.sampleTimes(for: speaker.label)
+                if !times.isEmpty, SnippetPlayer.shared.canPlay(recording) {
+                    Button {
+                        SnippetPlayer.shared.play(recording, at: times[sampleIndex % times.count])
+                        sampleIndex += 1
+                    } label: {
+                        Label(times.count > 1 ? "Sample \(sampleIndex % times.count + 1)/\(times.count)" : "Sample", systemImage: "play.circle")
+                    }
+                    .buttonStyle(.borderless).help("Play a few seconds of this voice; press again for another sample")
                 }
                 #endif
                 whoMenu(person)

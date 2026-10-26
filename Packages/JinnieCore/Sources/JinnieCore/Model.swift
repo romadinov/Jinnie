@@ -309,6 +309,9 @@ public struct Clarification: Entity {
     public var result: String?
     public var error: String?
     public var createdAt = Date()
+    /// Set when the owner changed an answer that was already applied: what was answered and changed before, to undo.
+    public var previousAnswer: String?
+    public var previousResult: String?
 
     public init(question: String) { self.question = question }
 

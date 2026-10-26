@@ -179,9 +179,10 @@ final class AppModel {
     // MARK: Open questions (Jinnie asks you to validate something)
 
     var openClarifications: [Clarification] { clarifications.filter { $0.status == .open } }
-    /// Answered but not yet applied by the Mac, or applied/failed recently: shown so you see what happened.
+    /// Answered but not yet applied by the Mac, or applied/failed in the last 30 days: shown so you see what happened
+    /// and can change an answer.
     var recentlyAnswered: [Clarification] {
-        let cutoff = Date().addingTimeInterval(-7 * 86400)
+        let cutoff = Date().addingTimeInterval(-30 * 86400)
         return clarifications.filter { ($0.status == .answered || $0.status == .applied) && ($0.answeredAt ?? $0.createdAt) > cutoff }
             .sorted { ($0.answeredAt ?? .distantPast) > ($1.answeredAt ?? .distantPast) }
     }
@@ -194,6 +195,24 @@ final class AppModel {
         c.answer = t
         c.answeredAt = Date()
         c.status = .answered
+        c.error = nil
+        store.save(c)
+        AgentHooks.shared?.runNow()
+    }
+
+    /// A different answer to a question already answered: the Mac undoes what the old answer changed, then applies this one.
+    func changeAnswer(_ c: Clarification, _ text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t != c.answer else { return }
+        var c = c
+        if c.status == .applied {   // not applied yet: just replace it
+            c.previousAnswer = c.answer
+            c.previousResult = c.result
+        }
+        c.answer = t
+        c.answeredAt = Date()
+        c.status = .answered
+        c.result = nil
         c.error = nil
         store.save(c)
         AgentHooks.shared?.runNow()
@@ -213,6 +232,8 @@ final class AppModel {
             guard let last = runs.filter({ $0.kind == "ingest:\(s.rawValue)" && $0.finishedAt != nil })
                 .max(by: { $0.startedAt < $1.startedAt }),
                   !last.ok, last.startedAt > cutoff else { return nil }
+            // Signed in again since it failed (Setup → Outlook): the next read will tell.
+            if let t = store.meta("\(s.rawValue).signedInAt").flatMap(Double.init), last.startedAt.timeIntervalSince1970 < t { return nil }
             return (s, last.message)
         }
     }

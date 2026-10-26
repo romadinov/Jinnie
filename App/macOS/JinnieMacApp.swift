@@ -30,6 +30,7 @@ struct JinnieMacApp: App {
             }
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { updater.checkForUpdates(nil) }
+                Button("Install Command-Line Tool…") { CommandLineTool.install() }
             }
             CommandGroup(after: .newItem) {
                 Button("Quick Note…") { CaptureController.shared.show() }.keyboardShortcut("n", modifiers: [.command, .shift])
@@ -84,17 +85,42 @@ struct MacRoot: View {
     @State private var path = NavigationPath()
 
     var body: some View {
-        NavigationSplitView {
-            List(Section_.allCases, selection: $section) { s in
-                Label(s.rawValue, systemImage: s.symbol).tag(s)
-                    .badge(s == .questions ? model.openClarifications.count : 0)
+        // A plain sidebar column next to a NavigationStack, like Uberdoer's Mac layout: NavigationSplitView on macOS 27
+        // highlighted the clicked row but kept showing the first section's page.
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                // Plain buttons, not List selection (which macOS 27 highlighted without updating the binding reliably).
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(Section_.allCases) { s in
+                            Button { section = s } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: s.symbol).frame(width: 18).foregroundStyle(section == s ? Color.white : Color.accentColor)
+                                    Text(s.rawValue)
+                                    Spacer()
+                                    if s == .questions, model.openClarifications.count > 0 {
+                                        Text("\(model.openClarifications.count)").font(.caption).foregroundStyle(section == s ? Color.white : Color.secondary)
+                                    }
+                                }
+                                .padding(.horizontal, 8).padding(.vertical, 5)
+                                .foregroundStyle(section == s ? Color.white : Color.primary)
+                                .background(RoundedRectangle(cornerRadius: 6).fill(section == s ? Color.accentColor : Color.clear))
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 8).padding(.top, 8)
+                }
+                AgentStatusFooter().padding(10)
             }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
-            .safeAreaInset(edge: .bottom) { AgentStatusFooter().padding(10) }
-        } detail: {
+            .frame(width: 190)
+            Divider()
             NavigationStack(path: $path) {
                 (section ?? .today).view.jinnieDestinations()
             }
+            .id(section)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onChange(of: section, initial: true) { path = NavigationPath(); model.cleanUp(); model.place = "Mac › \((section ?? .today).rawValue)" }
         .sheet(item: Binding(get: { ImprovementNoteRequest.shared.pending }, set: { ImprovementNoteRequest.shared.pending = $0 })) { p in
@@ -283,6 +309,7 @@ struct MacSettings: View {
     @State private var voiceShortcut = Shortcut.load(HotKeys.voiceKey, default: .voiceDefault)
     @State private var recordingRecord = false
     @State private var recordShortcut = Shortcut.load(HotKeys.recordKey, default: .recordDefault)
+    @State private var cliInstalled = CommandLineTool.isInstalled
 
     var body: some View {
         Form {
@@ -328,6 +355,14 @@ struct MacSettings: View {
                     }
                 }
             }
+            Section("Command line") {
+                LabeledContent("jinniectl") {
+                    Button(cliInstalled ? "Reinstall…" : "Install…") { CommandLineTool.install(); cliInstalled = CommandLineTool.isInstalled }
+                }
+                Text(cliInstalled ? "Installed in /usr/local/bin. Try: jinniectl doctor"
+                     : "Adds jinniectl to /usr/local/bin so Terminal can run it (asks for your password if needed).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Sources") {
                 ForEach(Source.connectors, id: \.self) { s in
                     Toggle(isOn: Binding(get: { agent.agent.isEnabled(s) }, set: { agent.agent.setEnabled(s, $0); agent.objectWillChangeHack += 1 })) {
@@ -338,11 +373,10 @@ struct MacSettings: View {
                         }
                     }
                 }
-                HStack {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Outlook (client Microsoft 365, e.g. Umbrella): read through Jinnie's own browser profile — no clicks, nothing marked as read.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Sign in to Outlook…") { try? OutlookReader().login() }
+                    OutlookSignInButtons()
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("reMarkable: handwritten notebooks are transcribed (Russian and English) within 30 minutes of writing.")

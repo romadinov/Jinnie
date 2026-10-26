@@ -6,7 +6,7 @@ import AVFoundation
 import Foundation
 
 /// An app that is using audio right now, as Core Audio sees it (macOS 14.2+).
-struct AudioProcess: Hashable {
+struct AudioProcess: Hashable, Sendable {
     let objectID: AudioObjectID
     let pid: pid_t
     let bundleID: String

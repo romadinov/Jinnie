@@ -332,20 +332,28 @@ extension MeetingRecorder.State {
 @MainActor
 final class SnippetPlayer {
     static let shared = SnippetPlayer()
-    private var player: AVAudioPlayer?
     private var stopTimer: Timer?
+
+    private var players: [AVAudioPlayer] = []
 
     func canPlay(_ rec: Recording) -> Bool { FileManager.default.fileExists(atPath: MeetingRecorder.audioURL(rec.id).path) }
 
+    /// The microphone and the meeting audio (the other people in an online call) together, from the same moment.
     func play(_ rec: Recording, at: Double, seconds: Double = 8) {
         stopTimer?.invalidate()
-        player?.stop()
-        guard let p = try? AVAudioPlayer(contentsOf: MeetingRecorder.audioURL(rec.id)) else { return }
-        p.currentTime = max(0, at - 0.3)
-        p.play()
-        player = p
+        players.forEach { $0.stop() }
+        players = [MeetingRecorder.audioURL(rec.id), MeetingRecorder.systemURL(rec.id)]
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+            .compactMap { try? AVAudioPlayer(contentsOf: $0) }
+        guard !players.isEmpty else { return }
+        let start = players[0].deviceCurrentTime + 0.05
+        for p in players {
+            p.currentTime = max(0, at - 0.3)
+            p.prepareToPlay()
+            p.play(atTime: start)
+        }
         stopTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { _ in
-            Task { @MainActor in SnippetPlayer.shared.player?.stop() }
+            Task { @MainActor in SnippetPlayer.shared.players.forEach { $0.stop() } }
         }
     }
 }

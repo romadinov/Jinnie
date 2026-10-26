@@ -59,7 +59,12 @@ struct SetupView: View {
                 }
             } header: { Text("Sources (claude.ai connectors)") }
             Section("Optional") {
-                ForEach(checks.filter { $0.level == .optional }) { c in SetupCheckRow(check: c, toggle: source(for: c)) }
+                ForEach(checks.filter { $0.level == .optional }) { c in
+                    SetupCheckRow(check: c, toggle: source(for: c))
+                    if c.id == "outlook" && OutlookReader.isInstalled && agent.agent.isEnabled(.outlook) {
+                        OutlookSignInButtons { refresh() }.padding(.leading, 22)
+                    }
+                }
                 VoiceSetupRow()
                 MessengerSetupRow()
             }
@@ -295,5 +300,62 @@ struct MessengerSetupRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Signs in to Outlook on the web: opens Jinnie's browser window, then checks the sign-in once the user says it's done
+/// and reads Outlook straight away, so the warning clears.
+struct OutlookSignInButtons: View {
+    @Environment(AgentController.self) private var agent
+    var onSignedIn: () -> Void = {}
+    @State private var state = Phase.idle
+    enum Phase: Equatable { case idle, waiting, checking, done(Bool), failed(String) }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            switch state {
+            case .waiting:
+                Text("Sign in in the browser window and choose \"Stay signed in\".").font(.callout)
+                Spacer()
+                Button("Cancel") { state = .idle }
+                Button("I've Signed In") { check() }.buttonStyle(.borderedProminent)
+            case .checking:
+                ProgressView().controlSize(.small)
+                Text("Checking Outlook…").font(.callout).foregroundStyle(.secondary)
+                Spacer()
+            default:
+                if case .done(let ok) = state {
+                    Label(ok ? "Signed in. Reading Outlook now." : "Still not signed in. Try again.",
+                          systemImage: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(ok ? .green : .orange)
+                }
+                if case .failed(let message) = state { Text(message).font(.callout).foregroundStyle(.red) }
+                Spacer()
+                Button("Sign In to Outlook…") { open() }
+            }
+        }
+    }
+
+    func open() {
+        state = .waiting
+        Task.detached {
+            do { try OutlookReader().login() }
+            catch { await MainActor.run { state = .failed("\(error)") } }
+        }
+    }
+
+    func check() {
+        state = .checking
+        Task.detached {
+            let result: Phase
+            do { result = .done(try OutlookReader().finishLogin()) } catch { result = .failed("\(error)") }
+            await MainActor.run {
+                state = result
+                if result == .done(true) {
+                    agent.agent.store.setMeta("outlook.signedInAt", String(Date().timeIntervalSince1970))
+                    AppModel.shared.reload(); agent.runNow(force: true); onSignedIn()
+                }
+            }
+        }
     }
 }

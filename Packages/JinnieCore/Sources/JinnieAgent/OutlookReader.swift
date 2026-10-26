@@ -23,7 +23,10 @@ public struct OutlookReader: Sendable {
     func browser(_ args: [String], timeout: TimeInterval = 90) throws -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
-        p.arguments = ["--session", Self.session, "--session-name", Self.session] + args
+        // A persistent Chrome profile, not --session-name: that only saves cookies when the browser is closed, so a
+        // sign-in in a window left open was lost, and Microsoft's "stay signed in" cookies need a real profile anyway.
+        try? FileManager.default.createDirectory(at: Self.profileDirectory, withIntermediateDirectories: true)
+        p.arguments = ["--session", Self.session, "--profile", Self.profileDirectory.path] + args
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
         p.environment = env
@@ -51,14 +54,28 @@ public struct OutlookReader: Sendable {
         try browser(["wait", "4000"])
         let current = try browser(["get", "url"])
         if current.contains("login.microsoftonline.com") || current.contains("login.live.com") {
-            throw ClaudeError(message: "Outlook sign-in expired. Run: jinniectl outlook-login (or Settings → Outlook → Sign in).")
+            throw ClaudeError(message: "Outlook sign-in expired. Sign in again: Settings → Setup → Outlook → Sign in…, or run \(SetupCheck.jinniectl) outlook-login")
         }
     }
 
-    /// Opens a visible browser window so the user can sign in (MFA, "stay signed in").
+    public static var profileDirectory: URL { JinnieConfig.supportDirectory().appendingPathComponent("outlook-browser") }
+
+    /// Opens a visible browser window so the user can sign in (MFA, "stay signed in"). Finish with `finishLogin()`.
     public func login() throws {
         try? browser(["close"])
         try browser(["--headed", "open", "https://outlook.office.com/mail/"])
+    }
+
+    /// After the user signed in: closes the window (Jinnie reads without one) and checks the sign-in stuck.
+    public func finishLogin() throws -> Bool {
+        try? browser(["close"])
+        return try isSignedIn()
+    }
+
+    /// Opens the mailbox without a window; false when Microsoft asks for a sign-in.
+    public func isSignedIn() throws -> Bool {
+        do { try open("https://outlook.office.com/mail/"); return true }
+        catch let e as ClaudeError where e.message.hasPrefix("Outlook sign-in expired") { return false }
     }
 
     /// One line per conversation in a mail folder, as Outlook lists it: flags, senders, subject, time, preview.

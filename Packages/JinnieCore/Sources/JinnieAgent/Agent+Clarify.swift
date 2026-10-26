@@ -104,6 +104,12 @@ extension Agent {
         Question you asked\(project.map { " about project \"\($0.name)\"" } ?? ""): \(c.question)
         \(c.why.map { "Why you asked: \($0)" } ?? "")
         \(people.isEmpty ? "" : "People it concerns: \(people.joined(separator: "; "))")
+        \(c.previousAnswer.map { """
+        The owner CHANGED their answer. Earlier answer: \($0)
+        What you changed for it then: \(c.previousResult ?? "unknown")
+        First undo those changes where they are wrong under the new answer (look the records up; split or move what was \
+        merged or moved, restore sides, roles and notes), then apply the new answer.
+        """ } ?? "")
         The owner's answer: \(c.answer ?? "")
         Today is \(Prompts.dayString(Date())).
         """)
@@ -119,7 +125,10 @@ extension Agent {
             let r = try await claude.run(call)
             let o = r.structured as? [String: Any] ?? [:]
             let fact = (o["fact"] as? String)?.nilIfEmpty ?? "\(c.question) — \(c.answer ?? "")"
-            var item = Item(source: .note, sourceRef: "clarification:\(c.id)", title: "Answer: \(c.question)", occurredAt: c.answeredAt ?? Date())
+            // A changed answer replaces the recorded one.
+            var item = store.all(Item.self).first { $0.sourceRef == "clarification:\(c.id)" }
+                ?? Item(source: .note, sourceRef: "clarification:\(c.id)", title: "Answer: \(c.question)", occurredAt: c.answeredAt ?? Date())
+            item.occurredAt = c.answeredAt ?? Date()
             item.author = JinnieConfig.ownerName
             item.summary = fact
             item.facts = [fact]
@@ -128,7 +137,10 @@ extension Agent {
             item.personIDs = c.personIDs ?? []
             store.save(item)
             // Re-read: the tools changed the record in another process.
+            let applied = c.answer
             c = store.get(Clarification.self, c.id) ?? c
+            // Changed again while this ran: the next pass applies the newer answer (and undoes this one).
+            if c.answer != applied { c.previousAnswer = applied; c.previousResult = (o["result"] as? String) ?? fact; c.applyingAt = nil; store.save(c); return }
             c.status = .applied
             c.appliedAt = Date()
             c.applyingAt = nil

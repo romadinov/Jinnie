@@ -117,6 +117,24 @@ Things that cost time building Jinnie, and what to do instead.
 - **Undo wrong voice matches at the source**: renaming alone left the bad sample on the wrong person; forget the samples
   similar to the corrected voice, keep provenance (recording, speaker) for every sample.
 
+- WhisperKit/Hub default to `~/Documents/huggingface` for the tokenizer. Reading Documents triggers a macOS permission
+  prompt (again after every re-signed build) and `open()` blocks until it is answered: recordings sat in "processing"
+  with 0% CPU. Always pass `tokenizerFolder` (and `downloadBase`) inside Application Support.
+- Never query Core Audio on the main thread in a poll: each property read is a round trip to coreaudiod (~80 ms per
+  detector tick here). The detector reads processes on a background queue and hands the snapshot to the main actor.
+
+- Drive: "look through Drive and open what matters" opened 5 of ~50 new decks and sheets. Jinnie now lets the model only
+  page through `search_files` and reads the file list from the tool results in the transcript (having the model copy out
+  200 files took 6 minutes and $1.25, and Haiku timed out writing a table instead). Pages of 100 exceed the MCP result
+  limit (saved to a file instead); Haiku garbles long page tokens. Jinnie picks unread or changed files itself, reads them
+  12 per call, logs every file opened, and fails the sync if the listing didn't reach the last page.
+- agent-browser `--session-name` saves cookies only on `close`: a sign-in in a window left open was lost when the next
+  read started a new browser. Outlook uses a persistent `--profile` (Application Support/Jinnie/outlook-browser), and
+  sign-in ends with an explicit "I've signed in" that closes the window and checks the mailbox opens.
+- Mac sidebar: on macOS 27 `NavigationSplitView` with `List(selection:)` highlighted rows but the detail never changed
+  (`NavigationLink(value:)` and `.id(selection)` didn't help). Like Uberdoer, use a plain column of buttons that set the
+  section, beside a `NavigationStack(path:).id(section)`; no NavigationSplitView on the Mac.
+
 ## Process
 - **Search before theorising.** The `-p` connector behaviour, the Microsoft 365 requirements and Outlook's scripting
   limits were all settled faster by searching and probing than by guessing.

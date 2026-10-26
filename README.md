@@ -192,7 +192,7 @@ and checks everything, with the exact steps for what's missing:
 | **Recommended** | Gmail and Google Calendar connected at [claude.ai → Settings → Connectors](https://claude.ai/settings/connectors) |
 | **Optional** | Slack and Google Drive connectors; Uberdoer; Outlook on the web for a client's Microsoft 365 (needs `agent-browser`); reMarkable (needs `rmapi`, `rmc`, `rsvg-convert`); voice (downloads a ~630 MB speech model) |
 
-`jinniectl doctor --connectors` (in `Jinnie.app/Contents/MacOS`) runs the same checks in Terminal. Updates install from
+`jinniectl doctor --connectors` (Jinnie → Install Command-Line Tool… puts it on the PATH) runs the same checks in Terminal. Updates install from
 the app (Jinnie → Check for Updates…; it also checks daily).
 
 **iPhone**: through TestFlight (ask for an invitation). Use the same Apple Account as on the Mac; the agent runs on the
@@ -211,7 +211,7 @@ Releases (notarized Mac DMG with in-app updates, TestFlight for iPhone): [docs/R
 
 ## CLI and MCP
 
-The app embeds `jinniectl`, which is the same program as `swift run jinnie` in `Packages/JinnieCore`.
+The app embeds `jinniectl` (Jinnie → Install Command-Line Tool… links it into /usr/local/bin), which is the same program as `swift run jinnie` in `Packages/JinnieCore`.
 
 ```sh
 J=/Applications/Jinnie.app/Contents/MacOS/jinniectl

@@ -12,6 +12,26 @@ public struct ClaudeResult: @unchecked Sendable {
     public var costUSD: Double
     public var durationMs: Int
     public var denials: [String]
+    /// The stream-json transcript, for reading tool results directly.
+    public var transcript = Data()
+
+    /// The text of every tool result whose call used a tool with this name suffix.
+    public func toolResults(_ suffix: String) -> [String] {
+        var ids = Set<String>()
+        var out: [String] = []
+        for line in transcript.split(separator: 0x0A) {
+            guard let o = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+                  let content = (o["message"] as? [String: Any])?["content"] as? [[String: Any]] else { continue }
+            for c in content {
+                if c["type"] as? String == "tool_use", (c["name"] as? String)?.hasSuffix(suffix) == true, let id = c["id"] as? String { ids.insert(id) }
+                if c["type"] as? String == "tool_result", let id = c["tool_use_id"] as? String, ids.contains(id) {
+                    if let s = c["content"] as? String { out.append(s) }
+                    else if let parts = c["content"] as? [[String: Any]] { out.append(parts.compactMap { $0["text"] as? String }.joined()) }
+                }
+            }
+        }
+        return out
+    }
 }
 
 /// Runs `claude -p` headless on the user's Claude subscription. The user's claude.ai connectors
@@ -77,9 +97,13 @@ public struct Claude: Sendable {
         if let e = call.effort { args += ["--effort", e] }
         if let s = call.systemPrompt { args += ["--append-system-prompt", s] }
         if let schema = call.jsonSchema { args += ["--json-schema", schema] }
+        var mcpFile: URL?
+        defer { if let f = mcpFile { try? FileManager.default.removeItem(at: f) } }
         if let mcp = call.mcpConfig {
+            removeStaleMCPConfigs()
             let file = workDirectory.appendingPathComponent("mcp-\(UUID().uuidString).json")
             try mcp.write(to: file, atomically: true, encoding: .utf8)
+            mcpFile = file
             args += ["--mcp-config", file.path]
             if call.strictMCP { args.append("--strict-mcp-config") }
         }
@@ -104,7 +128,8 @@ public struct Claude: Sendable {
                             structured: obj["structured_output"],
                             costUSD: obj["total_cost_usd"] as? Double ?? 0,
                             durationMs: obj["duration_ms"] as? Int ?? 0,
-                            denials: denials)
+                            denials: denials,
+                            transcript: output.stdout)
     }
 
     public var tracesDirectory: URL { workDirectory.appendingPathComponent("traces") }
@@ -117,6 +142,16 @@ public struct Claude: Sendable {
         try? data.write(to: dir.appendingPathComponent("\(f.string(from: Date()))-\(label).jsonl"))
         if let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path).sorted(), files.count > 60 {
             for old in files.prefix(files.count - 60) { try? FileManager.default.removeItem(at: dir.appendingPathComponent(old)) }
+        }
+    }
+
+    /// Config files left by runs that were killed before they could remove their own (older than a day).
+    func removeStaleMCPConfigs() {
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-86_400)
+        for name in (try? fm.contentsOfDirectory(atPath: workDirectory.path)) ?? [] where name.hasPrefix("mcp-") && name.hasSuffix(".json") {
+            let url = workDirectory.appendingPathComponent(name)
+            if let d = (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date, d < cutoff { try? fm.removeItem(at: url) }
         }
     }
 
