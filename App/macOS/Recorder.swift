@@ -217,14 +217,14 @@ final class MeetingRecorder {
             let merged = diarization.addSpeakerInfo(to: transcription).flatMap { $0 }
 
             rec.segments = merged.compactMap { seg in
-                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = WhisperModel.clean(seg.text)
                 guard !text.isEmpty else { return nil }
                 return RecordedSegment(speaker: seg.speaker.speakerId, start: Double(seg.startTime), end: Double(seg.endTime), text: text)
             }
             if rec.segments.isEmpty {  // no speech found by separation: keep the plain transcript
                 rec.segments = transcription.flatMap(\.segments).map {
                     RecordedSegment(speaker: nil, start: Double($0.start), end: Double($0.end), text: WhisperModel.clean($0.text))
-                }
+                }.filter { !$0.text.isEmpty }
             }
             for c in AppModel.shared.rememberedCorrections { rec.replace(c.from, with: c.to) }
             rec.speakers = Self.speakers(from: rec.segments, diarization: diarization, keeping: rec.speakers)

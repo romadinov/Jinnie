@@ -19,6 +19,23 @@ struct RecordingsView: View {
                     .contextMenu { Button("Delete", role: .destructive) { model.deleteRecording(r) } }
                     .swipeActions { Button("Delete", role: .destructive) { model.deleteRecording(r) } }
             }
+            let fixes = model.rememberedCorrections
+            if !fixes.isEmpty {
+                Panel(id: "recordings.fixes", title: "Word fixes", count: fixes.count) {
+                    ForEach(fixes, id: \.from) { c in
+                        HStack {
+                            Text(c.from).strikethrough().foregroundStyle(.secondary)
+                            Image(systemName: "arrow.right").font(.caption).foregroundStyle(.secondary)
+                            Text(c.to)
+                            Spacer()
+                            Button { model.forgetCorrection(c.from) } label: { Image(systemName: "xmark") }
+                                .buttonStyle(.borderless).foregroundStyle(.secondary).help("Stop fixing this in new recordings")
+                        }
+                    }
+                    Text("Applied to every new transcript. Add one from a recording: Transcript → Replace a Word.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
         .navigationTitle("Recordings")
     }
@@ -304,14 +321,14 @@ struct TranscriptEditor: View {
                             Image(systemName: "arrow.right").foregroundStyle(.secondary)
                             TextField("Should be", text: $to).textFieldStyle(.roundedBorder)
                         }
-                        Toggle("Also fix it in future recordings", isOn: $remember)
+                        Toggle("Fix it in all recordings, past and future", isOn: $remember)
                         HStack {
                             Spacer()
                             Button("Cancel") { replacing = false }
                             Button("Replace") {
-                                let n = model.replaceInTranscript(r, from, with: to, remember: remember)
-                                note = n == 0 ? "\"\(from)\" isn't in this transcript\(remember ? "; future recordings will still be fixed" : "")."
-                                    : "Replaced \(n) time\(n == 1 ? "" : "s")."
+                                let n = model.replaceInTranscript(r, from, with: to, everywhere: remember)
+                                note = n == 0 ? "\"\(from)\" wasn't found\(remember ? "; future recordings will still be fixed" : "")."
+                                    : "Replaced \(n) time\(n == 1 ? "" : "s")\(remember ? " across your recordings" : "")."
                                 if n > 0 { changed = true }
                                 replacing = false; from = ""; to = ""
                             }

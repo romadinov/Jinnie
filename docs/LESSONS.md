@@ -7,6 +7,9 @@ Things that cost time building Jinnie, and what to do instead.
   `--tools ""` removes ToolSearch, and with it every connector; use `--tools ToolSearch`. `--strict-mcp-config` drops the
   connectors as well. The stream-json `init` message lists only local MCP servers, so an empty list there doesn't mean the
   connectors are missing.
+- **A signed-out connector looks like a quiet inbox.** claude.ai keeps listing it, ToolSearch answers "No matching deferred
+  tools found", and the run returns 0 items with no error. Jinnie fails any run that needed connector tools, used none and
+  got that answer, so the source shows as signed out (it went unnoticed for hours on 2026-10-26).
 - **Discover connector tool names at runtime and filter by an allow-list of read verbs.** A deny-list of write verbs
   leaked `unlabel_*`, `untrash_*` and `unmark_*`.
 - **`--json-schema` returns the result in `structured_output`.** Use stream-json and save every run as a transcript.

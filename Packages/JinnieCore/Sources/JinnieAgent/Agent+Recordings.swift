@@ -35,12 +35,15 @@ extension Agent {
         }
         let meeting = rec.meetingItemID.flatMap { store.get(Item.self, $0) }
         let end = rec.startedAt.addingTimeInterval(rec.duration)
+        let glossary = Set(store.all(Recording.self).flatMap { $0.corrections ?? [] }.filter { $0.remember == true }.map(\.to))
+            .sorted().joined(separator: ", ")
         let task = """
         Below is the transcript of a conversation the owner recorded on \(Prompts.isoString(rec.startedAt)) \
         (\(Int(rec.duration / 60)) min, until \(Prompts.isoString(end))), transcribed and separated by speaker on the owner's Mac. \
         \(meeting.map { "It was most likely the calendar meeting \"\($0.title)\" (item \($0.id))." } ?? "")
         Speakers: \(names.joined(separator: "; ")).
         Transcription can mishear names and terms (the owner speaks \(OwnerProfile.current.languages)): use the directory to read them correctly. \
+        \(glossary.isEmpty ? "" : "Terms the owner uses (fix similar-sounding words): \(glossary). ")\
         Speaker separation can occasionally mix two voices; if a line clearly can't be that speaker, rely on the content.
 
         Return ONE item: sourceRef = "\(rec.id)", title = a descriptive meeting title (\"\(rec.title)\" is only a default), \

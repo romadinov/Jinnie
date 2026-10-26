@@ -60,6 +60,7 @@ extension Agent {
         list.label = "drive-list"
         list.timeout = 600
         let listed = try await claude.run(list)
+        try Agent.checkConnectorsReached(listed, tools: tools)
         // The files come from the search results themselves: having the model copy out a long listing was slow and
         // timed out (and it may skip or garble entries).
         var files: [DriveFile] = []

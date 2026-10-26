@@ -86,6 +86,12 @@ public final class Agent: @unchecked Sendable {
         syncUberdoer()
         await answerQuestions()
         await applyClarifications()
+        if store.meta("customers.assigned.v2") == nil {
+            do { try await assignCustomers() } catch { log("Customers: \(error)") }
+        }
+        if prospectsDue {
+            do { try await discoverProspects() } catch { log("Prospects: \(error)") }
+        }
         await summarizeRequested()
         await refreshSummaries()
         await enrichActions()
@@ -197,6 +203,10 @@ public final class Agent: @unchecked Sendable {
         } catch {
             run.ok = false
             run.message = "\(error)"
+            if run.message.hasPrefix("Signed out in claude.ai") {
+                run.message = "\(source.label) is signed out in claude.ai. Reconnect it in claude.ai → Settings → Connectors."
+                _ = try? await tools(for: source, refresh: true)   // records the sign-in state for Setup
+            }
             log("\(source.label) failed: \(error)")
         }
         run.finishedAt = Date()
@@ -245,8 +255,18 @@ public final class Agent: @unchecked Sendable {
         if !label.hasPrefix("scan-") { call.model = Agent.routineModel }
         if tools.isEmpty { call.strictMCP = true; call.mcpConfig = #"{"mcpServers":{}}"# }
         let result = try await claude.run(call)
+        try Agent.checkConnectorsReached(result, tools: tools)
         guard result.structured != nil else { throw ClaudeError(message: "No structured output: \(result.text.prefix(300))") }
         return result
+    }
+
+    /// A run that needed connector tools but never got one (claude.ai lists a signed-out connector without tools) must
+    /// fail, not report "0 items": otherwise a signed-out connector looks like a quiet inbox.
+    static func checkConnectorsReached(_ r: ClaudeResult, tools: [String]) throws {
+        let connectorTools = tools.filter { $0.hasPrefix("mcp__claude_ai_") }
+        guard !connectorTools.isEmpty, !r.usedAny(connectorTools),
+              r.toolResults("ToolSearch").contains(where: { $0.contains("No matching deferred tools") }) else { return }
+        throw ClaudeError(message: "Signed out in claude.ai: the connector offered no tools. Reconnect it in claude.ai → Settings → Connectors.")
     }
 
     func recentRefs(_ source: Source, days: Double) -> [String] {
@@ -303,6 +323,9 @@ public final class Agent: @unchecked Sendable {
             if var existing = dir.project(named: name) {
                 existing.aliases = merge(existing.aliases, np["aliases"] as? [String])
                 existing.domains = merge(existing.domains, np["domains"] as? [String])
+                if existing.customerID == nil, let c = np["customer"] as? String {
+                    existing.customerID = customerID(named: c, domains: existing.domains, prospect: np["customerIsProspect"] as? Bool)
+                }
                 store.save(existing)
                 dir = Directory(store: store)
                 continue
@@ -312,6 +335,7 @@ public final class Agent: @unchecked Sendable {
             p.domains = (np["domains"] as? [String] ?? []).map { $0.lowercased() }
             p.description = np["description"] as? String ?? ""
             if (np["isWork"] as? Bool) ?? true { p.uberdoerPath = "\(JinnieConfig.uberdoerWorkFolder) : \(name)" }
+            if let c = np["customer"] as? String { p.customerID = customerID(named: c, domains: p.domains, prospect: np["customerIsProspect"] as? Bool) }
             store.save(p)
             stats.projects += 1
             log("New project: \(name)")

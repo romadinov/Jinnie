@@ -51,12 +51,37 @@ public struct Project: Entity {
     public var stakeholders: [Stakeholder]?
     /// Latest developments, newest first: short headlines with their sources.
     public var news: [NewsItem]?
+    /// The customer this project is for; nil for internal work.
+    public var customerID: String?
 
     public enum Status: String, Codable, Sendable, CaseIterable { case active, onHold, done }
 
     public init(name: String) { self.name = name }
 
     public var searchText: String { ([name] + aliases + domains + channels + [description]).joined(separator: " ") }
+}
+
+// MARK: - Customer (a client organisation; one customer can have several projects)
+
+public struct Customer: Entity {
+    public static let type = "customer"
+    public var id = newID()
+    public var updatedAt = Date()
+    public var deleted = false
+
+    public var name: String
+    /// Other names it goes by ("Акме", "Acme Telco").
+    public var aliases: [String] = []
+    /// E-mail domains ("acme-telco.example").
+    public var domains: [String] = []
+    public var description: String = ""
+    /// A potential customer: a presales opportunity, not a client yet.
+    public var prospect: Bool?
+
+    public init(name: String) { self.name = name }
+
+    public var isProspect: Bool { prospect == true }
+    public var searchText: String { ([name] + aliases + domains + [description]).joined(separator: " ") }
 }
 
 public struct NewsItem: Codable, Hashable, Sendable {

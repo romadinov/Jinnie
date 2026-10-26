@@ -15,6 +15,17 @@ public struct ClaudeResult: @unchecked Sendable {
     /// The stream-json transcript, for reading tool results directly.
     public var transcript = Data()
 
+    /// Whether the run called any of these tools.
+    public func usedAny(_ names: [String]) -> Bool {
+        let set = Set(names)
+        for line in transcript.split(separator: 0x0A) {
+            guard let o = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+                  let content = (o["message"] as? [String: Any])?["content"] as? [[String: Any]] else { continue }
+            if content.contains(where: { $0["type"] as? String == "tool_use" && set.contains($0["name"] as? String ?? "") }) { return true }
+        }
+        return false
+    }
+
     /// The text of every tool result whose call used a tool with this name suffix.
     public func toolResults(_ suffix: String) -> [String] {
         var ids = Set<String>()

@@ -367,3 +367,31 @@ func tempStore() throws -> Store {
     #expect(r.segments[0].end == 4)
     #expect(r.turns[0].text == "Initech said hi, and that's it.")
 }
+
+@Test func customerMatcherFindsMentionsOutsideItsProjects() {
+    var c = Customer(name: "Globex Corp")
+    c.aliases = ["Globex"]
+    c.domains = ["globex.example"]
+    var dana = Person(name: "Dana Fischer"); dana.emails = ["dana@mail.globex.example"]
+    var sam = Person(name: "Sam Lee"); sam.org = "Globex"
+    let other = Person(name: "Ann Other")
+    let sales = Project(name: "Sales")
+    let dir = Directory(people: [dana, sam, other], projects: [sales], customers: [c])
+    let m = CustomerMatcher(c, in: dir)
+    #expect(m.personIDs == [dana.id, sam.id])
+    var a = Item(source: .email, sourceRef: "1", title: "Pricing for globex", occurredAt: Date()); a.projectIDs = [sales.id]
+    var b = Item(source: .email, sourceRef: "2", title: "Lunch", occurredAt: Date()); b.personIDs = [sam.id]
+    var d = Item(source: .email, sourceRef: "3", title: "Hello", occurredAt: Date()); d.authorEmail = "x@globex.example"
+    let e = Item(source: .email, sourceRef: "4", title: "Globexian news", occurredAt: Date())
+    #expect(m.matches(a) && m.matches(b) && m.matches(d))
+    #expect(!m.matches(e))
+}
+
+@Test func whisperStockPhrasesAreRemoved() {
+    var r = Recording(title: "Call")
+    r.segments = [RecordedSegment(speaker: 0, start: 0, end: 2, text: "Thanks."),
+                  RecordedSegment(speaker: 0, start: 2, end: 4, text: "Продолжение следует..."),
+                  RecordedSegment(speaker: 1, start: 4, end: 6, text: "Subtitles aside, MACD is up.")]
+    #expect(r.removeHallucinations() == 1)
+    #expect(r.segments.map(\.text) == ["Thanks.", "Subtitles aside, MACD is up."])
+}

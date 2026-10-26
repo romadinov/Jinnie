@@ -94,6 +94,35 @@ public struct Recording: Entity {
         for i in turn.indices.dropFirst().sorted(by: >) where segments.indices.contains(i) { segments.remove(at: i) }
     }
 
+    /// Stock phrases Whisper "hears" in silence or music, learned from subtitled training data.
+    public static let hallucinations = [
+        "Продолжение следует", "Субтитры сделал DimaTorzok", "Субтитры создавал DimaTorzok", "Редактор субтитров",
+        "Корректор А.Егорова", "Субтитры", "Спасибо за просмотр", "Thank you for watching", "Thanks for watching",
+        "Please subscribe", "[BLANK_AUDIO]", "(music)", "[Music]", "♪",
+    ]
+
+    /// A segment's text without those phrases; empty if nothing real is left.
+    public static func withoutHallucinations(_ s: String) -> String {
+        var t = s
+        for j in hallucinations where t.localizedCaseInsensitiveContains(j) { t = t.replacingOccurrences(of: j, with: "", options: .caseInsensitive) }
+        let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        let meaningful = trimmed.trimmingCharacters(in: .punctuationCharacters.union(.whitespaces).subtracting(CharacterSet(charactersIn: "?!")))
+        return meaningful.isEmpty ? "" : trimmed
+    }
+
+    /// Removes those phrases from every segment (dropping segments left empty). Returns how many segments changed.
+    @discardableResult
+    public mutating func removeHallucinations() -> Int {
+        var changed = 0
+        segments = segments.compactMap { seg in
+            let t = Recording.withoutHallucinations(seg.text)
+            if t != seg.text { changed += 1 }
+            guard !t.isEmpty else { return nil }
+            var s = seg; s.text = t; return s
+        }
+        return changed
+    }
+
     /// Replaces a word or phrase everywhere in the transcript (whole words, any case). Returns how many were replaced.
     @discardableResult
     public mutating func replace(_ from: String, with to: String) -> Int {

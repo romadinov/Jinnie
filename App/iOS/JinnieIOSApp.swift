@@ -47,7 +47,10 @@ struct IOSRoot: View {
         TabView(selection: $tab) {
             ForEach([Section_.notes, .actions, .projects, .ask, .today], id: \.self) { s in
                 NavigationStack {
-                    s.view.jinnieDestinations()
+                    Group {
+                        if s == .projects { ProjectsAndCustomers() } else { s.view }
+                    }
+                    .jinnieDestinations()
                         .toolbar {
                             if s == .today {
                                 if ImprovementNoteRequest.isAvailable {
@@ -105,5 +108,25 @@ struct JinnieShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: AddNoteIntent(), phrases: ["Add a note to \(.applicationName)", "\(.applicationName) note"],
                     shortTitle: "Add Note", systemImageName: "square.and.pencil")
+    }
+}
+
+/// iPhone: Projects and Customers share a tab (the tab bar has room for five).
+struct ProjectsAndCustomers: View {
+    @AppStorage("projectsTabShowsCustomers") private var customers = false
+
+    var body: some View {
+        Group {
+            if customers { CustomersView() } else { ProjectsView() }
+        }
+        .safeAreaInset(edge: .top) {
+            Picker("Show", selection: $customers) {
+                Text("Projects").tag(false)
+                Text("Customers").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16).padding(.bottom, 6)
+            .background(.bar)
+        }
     }
 }

@@ -116,11 +116,5 @@ final class WhisperModel {
     }
 
     /// Whisper sometimes "hears" stock phrases in near-silence; drop those.
-    static func clean(_ s: String) -> String {
-        let junk = ["Продолжение следует", "Субтитры", "Thank you for watching", "Thanks for watching", "[BLANK_AUDIO]", "(music)"]
-        var t = s
-        for j in junk where t.localizedCaseInsensitiveContains(j) { t = t.replacingOccurrences(of: j, with: "", options: .caseInsensitive) }
-        return t.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters.subtracting(CharacterSet(charactersIn: "?!"))))
-            .isEmpty ? "" : t.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    static func clean(_ s: String) -> String { Recording.withoutHallucinations(s) }
 }

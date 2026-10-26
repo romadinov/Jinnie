@@ -34,6 +34,9 @@ It runs on the Claude subscription through headless `claude -p`, so no API key i
   linked once that person is learned.
 - **Notes teach the directory.** "Acme is part of Globex" adds Globex as an alias. A stated role, nickname or
   membership updates the person. A role change triggers a stakeholder and summary refresh for that project straight away.
+- **Customers group projects.** One client organisation can have several projects. A new project names its customer
+  when it is extracted; projects from before were grouped once by the model (`jinniectl customers --assign` re-runs it).
+  Internal work has no customer. The Customers screen shows each customer's projects, news, actions, people and documents.
 - **Contacts** are learned from 6 months of mail headers on the first run.
 - **History.** Regular runs read only what is new. **Scan History** reads a project's last 6 months: threads with its
   names, domains and people, plus meetings, documents and Slack. A scan runs automatically before a summary if the last

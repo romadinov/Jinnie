@@ -9,6 +9,7 @@ final class AgentHooks {
     var runNow: () -> Void = {}
     var summarize: (String) -> Void = { _ in }
     var scan: (String) -> Void = { _ in }
+    var scanCustomer: (String) -> Void = { _ in }
     var isRunning: () -> Bool = { false }
     var status: () -> String = { "" }
 }

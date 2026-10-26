@@ -16,6 +16,9 @@ final class AppModel {
     var syncStatus = SyncStatus()
 
     private(set) var projects: [Project] = []
+    private(set) var customers: [Customer] = []
+    /// Per customer: what concerns it (projects, its people, its domains, mentions), rebuilt on reload.
+    private(set) var customerMatchers: [String: CustomerMatcher] = [:]
     private(set) var people: [Person] = []
     private(set) var items: [Item] = []
     private(set) var actions: [Action] = []
@@ -90,6 +93,7 @@ final class AppModel {
 
     func reload() {
         projects = store.all(Project.self).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        customers = store.all(Customer.self).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         people = store.all(Person.self).filter { !$0.isMe }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         items = store.all(Item.self).sorted { $0.occurredAt > $1.occurredAt }
         actions = store.all(Action.self).sorted { ($0.due ?? "9999", $1.createdAt) < ($1.due ?? "9999", $0.createdAt) }
@@ -98,7 +102,8 @@ final class AppModel {
         clarifications = store.all(Clarification.self).sorted { $0.createdAt > $1.createdAt }
         recordings = store.all(Recording.self).sorted { $0.startedAt > $1.startedAt }
         runs = store.all(RunLog.self).sorted { $0.startedAt > $1.startedAt }
-        directory = Directory(people: store.all(Person.self), projects: projects)
+        directory = Directory(people: store.all(Person.self), projects: projects, customers: customers)
+        customerMatchers = Dictionary(uniqueKeysWithValues: customers.map { ($0.id, CustomerMatcher($0, in: directory)) })
     }
 
     // MARK: Lookups
@@ -137,6 +142,54 @@ final class AppModel {
         return ids.compactMap { person($0) }.filter { !$0.isMe }
             .map { (person: $0, count: counts[$0.id] ?? 0) }
             .sorted { ($0.count, $1.person.name) > ($1.count, $0.person.name) }
+    }
+
+    /// The latest thing that happened, ignoring upcoming meetings (items are sorted newest first).
+    func lastActivity(_ items: [Item]) -> Date? { items.first { $0.occurredAt <= Date() }?.occurredAt }
+
+    // MARK: Customers
+
+    func customer(_ id: String?) -> Customer? { directory.customer(id: id) }
+    func projects(for customer: Customer) -> [Project] { projects.filter { $0.customerID == customer.id } }
+    func matcher(_ customer: Customer) -> CustomerMatcher { customerMatchers[customer.id] ?? CustomerMatcher(customer, in: directory) }
+    func items(for customer: Customer) -> [Item] { let m = matcher(customer); return items.filter(m.matches) }
+    func actions(for customer: Customer) -> [Action] { let m = matcher(customer); return actions.filter(m.matches) }
+    /// People at the customer who aren't among its projects' stakeholders.
+    func otherPeople(for customer: Customer) -> [Person] {
+        let listed = Set(contacts(for: customer).map(\.personID))
+        return matcher(customer).personIDs.subtracting(listed).compactMap { person($0) }.sorted { $0.name < $1.name }
+    }
+    func news(for customer: Customer) -> [(project: Project, news: NewsItem)] {
+        projects(for: customer).flatMap { p in (p.news ?? []).map { (project: p, news: $0) } }
+            .sorted { $0.news.date > $1.news.date }
+    }
+    /// The customer's people across its projects: stakeholders on the customer side (key ones first), one row each.
+    func contacts(for customer: Customer) -> [Stakeholder] {
+        var seen = Set<String>()
+        return projects(for: customer).flatMap { $0.stakeholders ?? [] }
+            .filter { $0.side == .customer }
+            .sorted { ($0.former == true ? 1 : 0, $0.key == true ? 0 : 1) < ($1.former == true ? 1 : 0, $1.key == true ? 0 : 1) }
+            .filter { seen.insert($0.personID).inserted }
+    }
+    func documents(for customer: Customer) -> [(doc: DocLink, date: Date)] {
+        var seen = Set<String>()
+        return items(for: customer).flatMap { i in (i.documents ?? []).map { (doc: $0, date: i.occurredAt) } }
+            .filter { seen.insert($0.doc.url).inserted }
+    }
+
+    func deleteCustomer(_ c: Customer) {
+        for var p in projects(for: c) { p.customerID = nil; store.save(p) }
+        store.delete(c)
+    }
+
+    /// Sets a project's customer by name: an existing one, or a new one (with the project's email domains). Empty = none.
+    func setCustomer(_ project: Project, name: String) {
+        var p = project
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if n.isEmpty { p.customerID = nil }
+        else if let c = directory.customer(named: n) { p.customerID = c.id }
+        else { var c = Customer(name: n); c.domains = p.domains; c = store.save(c); p.customerID = c.id }
+        store.save(p)
     }
 
     func personName(_ a: Action) -> String? { person(a.personID)?.name ?? a.personName }
@@ -269,16 +322,31 @@ final class AppModel {
         store.save(fresh)
     }
 
-    /// Replaces a misheard word everywhere in this transcript; `remember` applies it to future recordings as well.
+    /// Replaces a misheard word in this transcript. `everywhere`: in every recording, and in future ones too.
+    /// Returns how many times it was replaced.
     @discardableResult
-    func replaceInTranscript(_ r: Recording, _ from: String, with to: String, remember: Bool) -> Int {
+    func replaceInTranscript(_ r: Recording, _ from: String, with to: String, everywhere: Bool) -> Int {
         guard var fresh = store.get(Recording.self, r.id) else { return 0 }
-        let n = fresh.replace(from, with: to)
+        var n = fresh.replace(from, with: to)
         var list = (fresh.corrections ?? []).filter { $0.from.lowercased() != from.lowercased() }
-        list.append(TranscriptCorrection(from: from, to: to, remember: remember))
+        list.append(TranscriptCorrection(from: from, to: to, remember: everywhere))
         fresh.corrections = list
         store.save(fresh)
+        if everywhere {
+            for var other in store.all(Recording.self) where other.id != r.id {
+                let k = other.replace(from, with: to)
+                if k > 0 { n += k; store.save(other) }
+            }
+        }
         return n
+    }
+
+    /// Stops fixing a word in new transcripts (already corrected text stays).
+    func forgetCorrection(_ from: String) {
+        for var rec in store.all(Recording.self) where rec.corrections?.contains(where: { $0.from.lowercased() == from.lowercased() && $0.remember == true }) == true {
+            rec.corrections = rec.corrections?.map { var c = $0; if c.from.lowercased() == from.lowercased() { c.remember = false }; return c }
+            store.save(rec)
+        }
     }
 
     /// Words to fix in every new transcript, from all recordings (newest wins).

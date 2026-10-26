@@ -45,12 +45,19 @@ final class AgentController {
         hooks.runNow = { [weak self] in self?.answerNow(); self?.runQuick() }
         hooks.summarize = { [weak self] id in self?.summarize(id) }
         hooks.scan = { [weak self] id in self?.scan(id) }
+        hooks.scanCustomer = { [weak self] id in self?.scanCustomer(id) }
         hooks.isRunning = { [weak self] in self?.isRunning ?? false }
         AgentHooks.shared = hooks
         // UI testing against a scratch database: no scheduler, no Uberdoer writes, no login item.
         // Testing: `-importAudio <file>` processes an audio file as if it had been recorded (works with JINNIE_NO_AGENT).
         if let path = UserDefaults.standard.string(forKey: "importAudio") { MeetingRecorder.shared.importAudio(URL(fileURLWithPath: path)) }
         if ProcessInfo.processInfo.environment["JINNIE_NO_AGENT"] != nil { return }
+        // Once: strip Whisper's stock phrases ("Продолжение следует…") from transcripts made before they were filtered.
+        if !UserDefaults.standard.bool(forKey: "removedHallucinations1") {
+            let store = AppModel.shared.store
+            for var rec in store.all(Recording.self) where rec.removeHallucinations() > 0 { store.save(rec) }
+            UserDefaults.standard.set(true, forKey: "removedHallucinations1")
+        }
         MeetingRecorder.shared.resumeInterrupted()
         MeetingDetector.shared.start()
 
@@ -207,6 +214,18 @@ final class AgentController {
         let agent = self.agent
         Task.detached {
             _ = try? await agent.scanProject(projectID)
+            agent.syncUberdoer()
+            await MainActor.run { self.isRunning = false; self.current = "" }
+        }
+    }
+
+    func scanCustomer(_ customerID: String) {
+        guard !isRunning else { current = "Busy — try again when the current run finishes"; return }
+        isRunning = true
+        current = "Scanning customer history…"
+        let agent = self.agent
+        Task.detached {
+            _ = try? await agent.scanCustomer(customerID)
             agent.syncUberdoer()
             await MainActor.run { self.isRunning = false; self.current = "" }
         }

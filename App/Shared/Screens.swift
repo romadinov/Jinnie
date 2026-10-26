@@ -314,7 +314,7 @@ struct ProjectsView: View {
 
     var body: some View {
         let active = model.projects.filter { $0.status != .done }
-            .map { (project: $0, last: model.items(for: $0).first?.occurredAt) }
+            .map { (project: $0, last: model.lastActivity(model.items(for: $0))) }
         List {
             Section {
                 ForEach(active.filter { $0.last != nil }.sorted { $0.last! > $1.last! }, id: \.project.id) { entry in
@@ -338,11 +338,15 @@ struct ProjectRow: View {
     @Environment(AppModel.self) private var model
     let project: Project
     let last: Date?
+    var showCustomer = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text(project.name).font(.body.weight(.semibold))
+                if showCustomer, let c = model.customer(project.customerID), c.name != project.name {
+                    Text(c.name).font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 let open = model.actions(for: project).filter { $0.status == .open }
                 let waiting = open.filter { $0.kind == .waiting }.count
@@ -378,6 +382,11 @@ struct ProjectDetail: View {
     var body: some View {
         if let p = model.project(projectID) {
             List {
+                if let c = model.customer(p.customerID) {
+                    NavigationLink(value: Route.customer(c.id)) {
+                        Label("\(c.isProspect ? "Potential customer" : "Customer"): \(c.name)", systemImage: "building.2")
+                    }
+                }
                 let questions = model.clarifications(for: p)
                 if !questions.isEmpty {
                     Panel(id: "project.questions", title: "Open questions", count: questions.count) {
@@ -505,11 +514,21 @@ struct ProjectEditor: View {
     @State private var aliases = ""
     @State private var domains = ""
     @State private var channels = ""
+    @State private var customer = ""
 
     var body: some View {
         NavigationStack {
             Form {
                 TextField("Name", text: $project.name)
+                TextField("Customer (empty for internal work)", text: $customer)
+                    .help("An existing customer's name, or a new one")
+                if !model.customers.isEmpty {
+                    Picker("Pick a customer", selection: $customer) {
+                        Text("None (internal)").tag("")
+                        ForEach(model.customers) { Text($0.isProspect ? "\($0.name) (potential)" : $0.name).tag($0.name) }
+                        if !customer.isEmpty && !model.customers.contains(where: { $0.name == customer }) { Text("New: \(customer)").tag(customer) }
+                    }
+                }
                 TextField("Aliases (comma separated)", text: $aliases)
                 TextField("Email domains", text: $domains)
                 TextField("Slack channels", text: $channels)
@@ -526,7 +545,9 @@ struct ProjectEditor: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         project.aliases = split(aliases); project.domains = split(domains).map { $0.lowercased() }; project.channels = split(channels)
-                        model.save(project); dismiss()
+                        model.save(project)
+                        if customer != (model.customer(project.customerID)?.name ?? "") { model.setCustomer(project, name: customer) }
+                        dismiss()
                     }
                 }
             }
@@ -534,6 +555,7 @@ struct ProjectEditor: View {
                 aliases = project.aliases.joined(separator: ", ")
                 domains = project.domains.joined(separator: ", ")
                 channels = project.channels.joined(separator: ", ")
+                customer = model.customer(project.customerID)?.name ?? ""
             }
         }
         .frame(minWidth: 420, minHeight: 360)
@@ -792,7 +814,7 @@ struct ActivityView: View {
 // MARK: - Navigation
 
 enum Route: Hashable {
-    case item(String), project(String), person(String), action(String), recording(String)
+    case item(String), project(String), person(String), action(String), recording(String), customer(String)
 
     /// jinnie://action/<id>, jinnie://item/<id>, jinnie://project/<id>, jinnie://person/<id>
     init?(url: URL) {
@@ -805,6 +827,7 @@ enum Route: Hashable {
         case "project": self = .project(id)
         case "person": self = .person(id)
         case "recording": self = .recording(id)
+        case "customer": self = .customer(id)
         default: return nil
         }
     }
@@ -836,6 +859,7 @@ struct RouteView: View {
         case .person(let id): "Person: " + (model.person(id)?.name ?? id)
         case .action(let id): "Action: " + (model.actions.first { $0.id == id }?.title ?? id)
         case .recording(let id): "Recording: " + (model.recording(id)?.title ?? id)
+        case .customer(let id): "Customer: " + (model.customer(id)?.name ?? id)
         }
     }
 
@@ -846,17 +870,18 @@ struct RouteView: View {
         case .person(let id): PersonDetail(personID: id)
         case .action(let id): ActionDetail(actionID: id)
         case .recording(let id): RecordingDetail(recordingID: id)
+        case .customer(let id): CustomerDetail(customerID: id)
         }
     }
 }
 
 enum Section_: String, CaseIterable, Identifiable {
-    case today = "Today", notes = "Notes", actions = "Actions", projects = "Projects", people = "People",
+    case today = "Today", notes = "Notes", actions = "Actions", customers = "Customers", projects = "Projects", people = "People",
          questions = "Questions", recordings = "Recordings", ask = "Ask", search = "Search", activity = "Activity"
     var id: String { rawValue }
     var symbol: String {
         switch self {
-        case .today: "sun.max"; case .notes: "note.text"; case .actions: "checklist"; case .projects: "folder"
+        case .today: "sun.max"; case .notes: "note.text"; case .actions: "checklist"; case .customers: "building.2"; case .projects: "folder"
         case .people: "person.2"; case .questions: "questionmark.bubble"; case .recordings: "waveform"; case .ask: "sparkles"; case .search: "magnifyingglass"; case .activity: "waveform.path.ecg"
         }
     }
@@ -865,6 +890,7 @@ enum Section_: String, CaseIterable, Identifiable {
         case .today: TodayView()
         case .notes: NotesView()
         case .actions: ActionsView()
+        case .customers: CustomersView()
         case .projects: ProjectsView()
         case .people: PeopleView()
         case .questions: QuestionsView()

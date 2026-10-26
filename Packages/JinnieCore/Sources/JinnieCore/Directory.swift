@@ -9,15 +9,30 @@ extension String {
 public struct Directory: Sendable {
     public var people: [Person]
     public var projects: [Project]
+    public var customers: [Customer]
 
     public init(store: Store) {
         people = store.all(Person.self)
         projects = store.all(Project.self)
+        customers = store.all(Customer.self)
     }
 
-    public init(people: [Person], projects: [Project]) {
-        self.people = people; self.projects = projects
+    public init(people: [Person], projects: [Project], customers: [Customer] = []) {
+        self.people = people; self.projects = projects; self.customers = customers
     }
+
+    // MARK: Customers
+
+    public func customer(id: String?) -> Customer? { id.flatMap { i in customers.first { $0.id == i } } }
+
+    public func customer(named name: String) -> Customer? {
+        let n = Self.norm(name)
+        guard !n.isEmpty else { return nil }
+        return customers.first { Self.norm($0.name) == n || $0.aliases.contains { Self.norm($0) == n } }
+    }
+
+    public func customer(of project: Project) -> Customer? { customer(id: project.customerID) }
+    public func projects(of customer: Customer) -> [Project] { projects.filter { $0.customerID == customer.id } }
 
     public static func norm(_ s: String) -> String {
         s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
@@ -88,9 +103,15 @@ public struct Directory: Sendable {
 
     /// Compact text the prompts include so the model uses canonical names.
     public func promptText(maxPeople: Int = 300) -> String {
-        var lines = ["PROJECTS (name | aliases | email domains | slack channels | uberdoer):"]
+        var lines: [String] = []
+        if !customers.isEmpty {
+            lines.append("CUSTOMERS (name | aliases | email domains):")
+            for c in customers { lines.append("- \(c.name)\(c.isProspect ? " (potential customer)" : "") | \(c.aliases.joined(separator: ", ")) | \(c.domains.joined(separator: ", "))") }
+            lines.append("")
+        }
+        lines.append("PROJECTS (name | customer | aliases | email domains | slack channels | uberdoer):")
         for p in projects where p.status != .done {
-            lines.append("- \(p.name) | \(p.aliases.joined(separator: ", ")) | \(p.domains.joined(separator: ", ")) | \(p.channels.joined(separator: ", ")) | \(p.uberdoerPath ?? "")")
+            lines.append("- \(p.name) | \(customer(of: p)?.name ?? "internal") | \(p.aliases.joined(separator: ", ")) | \(p.domains.joined(separator: ", ")) | \(p.channels.joined(separator: ", ")) | \(p.uberdoerPath ?? "")")
         }
         lines.append("")
         lines.append("PEOPLE (name | emails | aliases | org | role | projects):")
@@ -99,5 +120,56 @@ public struct Directory: Sendable {
             lines.append("- \(p.name) | \(p.emails.joined(separator: ", ")) | \(p.aliases.joined(separator: ", ")) | \(p.org ?? "") | \(p.role ?? "") | \(projs)")
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - What belongs to a customer
+
+/// Decides what concerns a customer: its projects, people at it (by email domain or organisation), mail from its domains,
+/// and items naming it. Customers without a project of their own (prospects discussed in a general sales project) get
+/// their page from this.
+public struct CustomerMatcher {
+    public let projectIDs: Set<String>
+    public let personIDs: Set<String>
+    let domains: [String]
+    let names: [String]
+    let nameRegex: NSRegularExpression?
+
+    public init(_ customer: Customer, in dir: Directory) {
+        projectIDs = Set(dir.projects(of: customer).map(\.id))
+        domains = customer.domains.map { Directory.norm($0) }.filter { !$0.isEmpty }
+        // Names too short or common to search for in text ("THE", "REV") only match through domains, people and projects.
+        names = ([customer.name] + customer.aliases).map { Directory.norm($0) }.filter { $0.count >= 5 }
+        nameRegex = names.isEmpty ? nil : try? NSRegularExpression(
+            pattern: "(?<![\\p{L}\\p{N}])(" + names.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|") + ")(?![\\p{L}\\p{N}])",
+            options: [.caseInsensitive])
+        let domains = self.domains
+        let names = self.names
+        personIDs = Set(dir.people.filter { p in
+            guard !p.isMe else { return false }
+            if p.emails.contains(where: { Self.domain($0, in: domains) }) { return true }
+            let org = Directory.norm(p.org ?? "")
+            return !org.isEmpty && names.contains { org == $0 || org.hasPrefix($0 + " ") || org.hasSuffix(" " + $0) }
+        }.map(\.id))
+    }
+
+    static func domain(_ email: String, in domains: [String]) -> Bool {
+        guard let d = email.split(separator: "@").last.map({ Directory.norm(String($0)) }) else { return false }
+        return domains.contains { d == $0 || d.hasSuffix("." + $0) }
+    }
+
+    public func matches(_ item: Item) -> Bool {
+        if !projectIDs.isDisjoint(with: item.projectIDs) || !personIDs.isDisjoint(with: item.personIDs) { return true }
+        if let e = item.authorEmail, Self.domain(e, in: domains) { return true }
+        guard let re = nameRegex else { return false }
+        let text = item.title + " " + item.summary
+        return re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    public func matches(_ action: Action) -> Bool {
+        if let p = action.projectID, projectIDs.contains(p) { return true }
+        if let p = action.personID, personIDs.contains(p) { return true }
+        guard let re = nameRegex else { return false }
+        return re.firstMatch(in: action.title, range: NSRange(action.title.startIndex..., in: action.title)) != nil
     }
 }

@@ -9,6 +9,9 @@ jinnie — personal knowledge agent
   jinnie profile [key value]    show or set the owner profile (name, emails, organization, role, languages, nicknames, uberdoerFolder)
   jinnie run [--force]          one scheduled cycle (notes, sources due, Uberdoer, questions)
   jinnie ingest <email|slack|calendar|drive|outlook|notes>
+  jinnie customers [--assign] [--discover]   list customers; --assign groups projects that have none;
+                                --discover finds potential customers in general sales projects
+  jinnie customers --scan <name>   read a customer's history (meetings, mail, documents, Slack)
   jinnie outlook-login          sign in to Outlook on the web (client Microsoft 365) in Jinnie's browser profile
   jinnie recordings [--process] list recordings (speakers, status); --process reads pending transcripts
   jinnie remarkable-peek        list reMarkable notebooks and which ones are due for transcription
@@ -92,6 +95,24 @@ case "ingest":
 case "uberdoer":
     if rest.contains("--enrich") { await agent.enrichActions(limit: 200) }
     agent.syncUberdoer(); done()
+case "customers":
+    if args.contains("--assign") {
+        do { print("Grouped \(try await agent.assignCustomers()) projects.") } catch { print("Failed: \(error)") }
+    }
+    if let i = args.firstIndex(of: "--scan"), i + 1 < args.count {
+        guard let c = Directory(store: store).customer(named: args[i + 1]) else { print("No such customer"); exit(1) }
+        do { print(try await agent.scanCustomer(c.id)) } catch { print("Failed: \(error)") }
+    }
+    if args.contains("--discover") {
+        do { print("New potential customers: \(try await agent.discoverProspects().joined(separator: ", "))") } catch { print("Failed: \(error)") }
+    }
+    let dir = Directory(store: store)
+    for c in dir.customers.sorted(by: { $0.name < $1.name }) {
+        print("\(c.name)\(c.isProspect ? " (potential)" : "")  [\(c.domains.joined(separator: ", "))]: " + dir.projects(of: c).map(\.name).joined(separator: ", "))
+    }
+    let noCustomer = dir.projects.filter { $0.customerID == nil && $0.status != .done }.map(\.name)
+    if !noCustomer.isEmpty { print("No customer: " + noCustomer.joined(separator: ", ")) }
+    exit(0)
 case "outlook-login":
     do {
         let r = OutlookReader()

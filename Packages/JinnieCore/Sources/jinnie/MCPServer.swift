@@ -42,8 +42,10 @@ struct MCPServer {
              ["project": str("Project name"), "person": str("Name or email"), "side": ["type": "string", "enum": ["ours", "customer", "partner", "other"]],
               "role": str("Role on this project"), "responsibilities": str("What they own here"), "key": ["type": "boolean"],
               "former": ["type": "boolean"], "replaced_by": str("Name of their replacement")], required: ["project", "person"]),
-        tool("update_project", "Add names, client email domains or a description to a project.",
-             ["project": str("Project name"), "aliases": ["type": "array", "items": ["type": "string"]],
+        tool("update_project", "Add names, client email domains or a description to a project, or set its customer.",
+             ["project": str("Project name"), "customer": str("The customer (client organisation) it is for; created if new. \"none\" for internal work"),
+              "prospect": ["type": "boolean", "description": "true: its customer is only a potential customer (presales); false: they became a client"],
+              "aliases": ["type": "array", "items": ["type": "string"]],
               "domains": ["type": "array", "items": ["type": "string"]], "description": str("One line")], required: ["project"]),
         tool("create_person", "Add a person Jinnie doesn't know yet (returns the existing one if the email is known).",
              ["name": str("Full name"), "email": str("Email, if known"), "org": str("Organisation"), "role": str("Role"),
@@ -138,7 +140,10 @@ struct MCPServer {
             }
             let items = store.all(Item.self).filter { $0.projectIDs.contains(p.id) }.sorted { $0.occurredAt > $1.occurredAt }
             let actions = store.all(Action.self).filter { $0.projectID == p.id }
-            return ["id": p.id, "name": p.name, "aliases": p.aliases, "domains": p.domains, "description": p.description,
+            let customer: String
+            if let c = dir.customer(of: p) { customer = c.isProspect ? c.name + " (potential customer)" : c.name } else { customer = "none (internal)" }
+            return ["id": p.id, "name": p.name, "customer": customer,
+                    "aliases": p.aliases, "domains": p.domains, "description": p.description,
                     "uberdoer": p.uberdoerPath ?? "", "summary": p.summary ?? "", "summaryAt": p.summaryAt.map(iso) ?? "",
                     "stakeholders": (p.stakeholders ?? []).compactMap { s -> [String: Any]? in
                         guard let person = dir.person(id: s.personID) else { return nil }
@@ -256,6 +261,15 @@ struct MCPServer {
             for al in a["aliases"] as? [String] ?? [] where !p.aliases.contains(al) { p.aliases.append(al) }
             for d in (a["domains"] as? [String] ?? []).map({ $0.lowercased() }) where !p.domains.contains(d) { p.domains.append(d) }
             if let d = a["description"] as? String, !d.isEmpty { p.description = d }
+            if let c = (a["customer"] as? String)?.trimmingCharacters(in: .whitespaces), !c.isEmpty {
+                if ["none", "internal"].contains(c.lowercased()) { p.customerID = nil }
+                else if let existing = dir.customer(named: c) { p.customerID = existing.id }
+                else { var n = Customer(name: c); n.domains = p.domains; n = store.save(n); p.customerID = n.id }
+            }
+            if let prospect = a["prospect"] as? Bool, let id = p.customerID, var c = store.get(Customer.self, id) {
+                c.prospect = prospect ? true : nil
+                store.save(c)
+            }
             p = store.save(p)
             JinnieConfig.postExternalChange()
             return ["updated": ["name": p.name, "aliases": p.aliases, "domains": p.domains, "description": p.description]]

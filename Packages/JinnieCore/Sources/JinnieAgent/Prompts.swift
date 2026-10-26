@@ -74,6 +74,8 @@ enum Prompts {
         "why":{"type":"string","description":"One short reason, e.g. 'is thanked by name and speaks for the client'"}}}},
       "newProjects":{"type":"array","items":{"type":"object","required":["name","isWork"],"properties":{
         "name":{"type":"string","description":"Short name, usually the client or initiative (e.g. 'Acme')"},
+        "customer":{"type":"string","description":"The customer (client organisation) it is for: an existing name from CUSTOMERS, or a new one. For a presales opportunity, the prospective customer. Omit for internal work"},
+        "customerIsProspect":{"type":"boolean","description":"True when the customer isn't a client yet (presales opportunity)"},
         "aliases":{"type":"array","items":{"type":"string"}},
         "domains":{"type":"array","items":{"type":"string"},"description":"Client email domains"},
         "description":{"type":"string"},
