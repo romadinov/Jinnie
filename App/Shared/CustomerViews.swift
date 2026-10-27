@@ -57,7 +57,9 @@ struct CustomerRow: View {
     let customer: Customer
     let last: Date?
 
-    var body: some View {
+    var body: some View { rowContent.copyable({ customer.name }, label: "Copy Name") }
+
+    @ViewBuilder var rowContent: some View {
         let projects = model.projects(for: customer).filter { $0.status != .done }
         VStack(alignment: .leading, spacing: 3) {
             HStack {

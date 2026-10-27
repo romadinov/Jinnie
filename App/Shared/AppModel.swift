@@ -287,6 +287,9 @@ final class AppModel {
                   !last.ok, last.startedAt > cutoff else { return nil }
             // Signed in again since it failed (Setup → Outlook): the next read will tell.
             if let t = store.meta("\(s.rawValue).signedInAt").flatMap(Double.init), last.startedAt.timeIntervalSince1970 < t { return nil }
+            // The connector answered with tools since it failed (signed in again): the next read will tell.
+            if store.meta("tools.\(s.rawValue)")?.isEmpty == false,
+               let t = store.meta("tools.\(s.rawValue).at").flatMap(Double.init), last.startedAt.timeIntervalSince1970 < t { return nil }
             return (s, last.message)
         }
     }
@@ -299,6 +302,33 @@ final class AppModel {
     /// Names a speaker (nil = "not sure"); see Store.assignSpeaker (learns the voice, undoes a wrong match).
     func assignSpeaker(_ rec: Recording, label: Int, personID: String?) {
         store.assignSpeaker(recordingID: rec.id, label: label, personID: personID)
+        AgentHooks.shared?.runNow()
+    }
+
+    /// Who meeting notes go to: the meeting's attendees, the speakers and call participants (not you), with their email
+    /// from Jinnie or, failing that, from Contacts. `missing`: names with no email anywhere.
+    func notesRecipients(_ r: Recording) -> (emails: [String], missing: [String]) {
+        let meeting = item(r.meetingItemID)
+        var seen = Set<String>(), emails: [String] = [], missing: [String] = []
+        for id in (meeting?.personIDs ?? []) + r.speakers.compactMap(\.personID) + (r.participantIDs ?? []) where seen.insert(id).inserted {
+            guard let p = person(id), !p.isMe else { continue }
+            if let e = p.emails.first ?? ContactsBridge.enriched(p)?.emails.first { emails.append(e) } else { missing.append(p.name) }
+        }
+        // Teams speakers not in the directory yet.
+        missing += r.speakers.filter { $0.personID == nil }.compactMap(\.name)
+        return (emails, missing)
+    }
+
+    func requestNotes(_ r: Recording) {
+        var c = r
+        c.notesRequestedAt = Date()
+        save(c)
+        AgentHooks.shared?.runNow()
+    }
+
+    /// Two voices that are one person: merges `from` into `into` (lines, talk time, voice), then Jinnie reads it again.
+    func mergeSpeaker(_ rec: Recording, _ from: Int, into: Int) {
+        store.mergeSpeaker(recordingID: rec.id, from, into: into)
         AgentHooks.shared?.runNow()
     }
 

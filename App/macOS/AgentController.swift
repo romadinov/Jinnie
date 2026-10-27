@@ -97,6 +97,7 @@ final class AgentController {
             if m.clarifications.contains(where: { $0.status == .answered && $0.error == nil }) { self.applyNow() }
             let pendingRecordings = m.recordings.contains { $0.status == .ready && $0.processedAt == nil && !$0.segments.isEmpty }
             let pendingSummaries = m.projects.contains { p in p.summaryRequestedAt.map { $0 > (p.summaryAt ?? .distantPast) } ?? false }
+                || m.recordings.contains(where: \.summaryPending) || m.recordings.contains(where: \.notesPending)
             if pendingQuestions { self.answerNow() }
             // Completed/dropped/reopened in Jinnie (here or on the iPhone) → Uberdoer follows within seconds.
             if m.actions.contains(where: { $0.needsPush == true }) {
@@ -107,6 +108,7 @@ final class AgentController {
                 }
             }
             if pendingNotes || pendingSummaries || pendingRecordings { self.runQuick() }
+            if m.recordings.contains(where: \.audioPending) { TeamsAudio.shared.checkRequests(agent: self.agent) }
         }
     }
 
@@ -178,6 +180,7 @@ final class AgentController {
                 await agent.processRecordings()
                 agent.syncUberdoer()
                 await agent.summarizeRequested()
+                await agent.summarizeRequestedRecordings()
             } else {
                 await agent.runCycle(force: force)
             }
@@ -193,6 +196,7 @@ final class AgentController {
         if full {
             lastCycle = Date()
             agent.store.setMeta("lastCycle", String(Date().timeIntervalSince1970))
+            ContactsBridge.enrichAll(agent.store)  // emails, companies, job titles for people Jinnie learned (blanks only)
         }
         if let q = queued {
             queued = nil

@@ -117,7 +117,7 @@ struct MacRoot: View {
             .frame(width: 190)
             Divider()
             NavigationStack(path: $path) {
-                (section ?? .today).view.jinnieDestinations()
+                (section ?? .today).view.jinnieDestinations().textSelection(.enabled)
             }
             .id(section)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -368,8 +368,10 @@ struct MacSettings: View {
                     Toggle(isOn: Binding(get: { agent.agent.isEnabled(s) }, set: { agent.agent.setEnabled(s, $0); agent.objectWillChangeHack += 1 })) {
                         VStack(alignment: .leading) {
                             Text(s.label)
-                            Text(agent.agent.lastRun(s).map { "Last read \($0.formatted(.relative(presentation: .named)))" } ?? "Not read yet")
-                                .font(.caption).foregroundStyle(.secondary)
+                            Text([agent.agent.connectorAccount(s).map { "Account: \($0)" },
+                                  agent.agent.lastRun(s).map { "Last read \($0.formatted(.relative(presentation: .named)))" } ?? "Not read yet"]
+                                .compactMap { $0 }.joined(separator: " · "))
+                                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         }
                     }
                 }
@@ -377,6 +379,16 @@ struct MacSettings: View {
                     Text("Outlook (client Microsoft 365, e.g. Umbrella): read through Jinnie's own browser profile — no clicks, nothing marked as read.")
                         .font(.caption).foregroundStyle(.secondary)
                     OutlookSignInButtons()
+                    Toggle("Read Teams transcripts of meetings shared with you", isOn: Binding(
+                        get: { agent.agent.readsTeamsRecordings },
+                        set: { agent.agent.setReadsTeamsRecordings($0); agent.objectWillChangeHack += 1 }))
+                    Text("Recordings shared in a Teams chat that Jinnie didn't record itself: Jinnie reads the transcript Teams shows in the player (speaker names included), then learns from it like a recording. Up to two per Outlook read.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Also record their audio and transcribe it on the Mac", isOn: Binding(
+                        get: { agent.agent.recordsTeamsAudio },
+                        set: { agent.agent.setRecordsTeamsAudio($0); agent.objectWillChangeHack += 1 }))
+                    Text("Jinnie plays each recording muted in its hidden browser and records the sound: an hour-long meeting takes an hour, and Outlook reads wait meanwhile. Needs ffmpeg. Any recording can also be done on its own with Record Audio on its card.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("reMarkable: handwritten notebooks are transcribed (Russian and English) within 30 minutes of writing.")
@@ -399,6 +411,7 @@ struct MacSettings: View {
                 LabeledContent("Uberdoer", value: Uberdoer.isInstalled ? "Connected" : "Not installed")
                 Button("Import projects from Uberdoer") { agent.importProjects() }
                 Button("Learn contacts from the last 6 months of mail") { agent.learnContacts() }.disabled(agent.isRunning)
+                ContactsFillButton()
                 Button("Show agent transcripts") { NSWorkspace.shared.open(agent.agent.claude.tracesDirectory) }
             }
         }
@@ -454,5 +467,25 @@ struct MeetingSettings: View {
             .onChange(of: skip) { _, v in detector.skipWords = v }
         Text("Recordings include the meeting app's audio, so the other participants are captured clearly (macOS asks once for System Audio Recording). Recording stops 30 s after the call ends. Many places require everyone's consent to be recorded: use “Copy notice for others” to tell them.")
             .font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+/// Fills people's missing emails, companies and job titles from Contacts (also done after every sync).
+struct ContactsFillButton: View {
+    @Environment(AppModel.self) private var model
+    @State private var note: String?
+
+    var body: some View {
+        HStack {
+            Button("Fill in people from Contacts") {
+                Task {
+                    let ok = ContactsBridge.allowed ? true : await ContactsBridge.requestAccess()
+                    guard ok else { note = "Contacts access is off: System Settings → Privacy & Security → Contacts."; return }
+                    let n = ContactsBridge.enrichAll(model.store)
+                    note = n == 0 ? "Nothing new in Contacts." : "Filled in \(n) \(n == 1 ? "person" : "people")."
+                }
+            }
+            if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
+        }
     }
 }

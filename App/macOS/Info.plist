@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSContactsUsageDescription</key>
-	<string>Jinnie matches the names in WhatsApp and Telegram calls to your contacts, to record work calls and skip private ones.</string>
+	<string>Jinnie fills in people's emails and companies from your contacts, adds people to Contacts when you ask, and matches the names in WhatsApp and Telegram calls to your contacts to record work calls and skip private ones.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Jinnie records the other participants of meetings you record (only the meeting app's audio) and transcribes them on this Mac.</string>
 	<key>SUFeedURL</key>

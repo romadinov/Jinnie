@@ -214,6 +214,26 @@ public struct Item: Entity {
     }
 
     public var naturalKey: String? { "\(source.rawValue):\(sourceRef)" }
+
+    /// Where to read this item in its own app. Outlook items are read from the message list and have no ids, so
+    /// they open as an Outlook search for the subject; calendar events without a link open as a calendar search.
+    public var link: URL? {
+        if let url, !url.isEmpty, let u = URL(string: url) { return u }
+        var q = URLComponents()
+        if source == .outlook {
+            q = URLComponents(string: "https://outlook.office.com/mail/deeplink/search")!
+            q.queryItems = [URLQueryItem(name: "query", value: title)]
+        } else if sourceRef.hasPrefix("outlook-cal:") {
+            return URL(string: "https://outlook.office.com/calendar/view/week")
+        } else if source == .calendar {
+            q = URLComponents(string: "https://calendar.google.com/calendar/r/search")!
+            q.queryItems = [URLQueryItem(name: "q", value: title)]
+        } else {
+            return nil
+        }
+        return q.url
+    }
+
     public var searchText: String {
         ([title, author ?? "", authorEmail ?? "", summary, excerpt, text ?? ""] + facts + (documents ?? []).map(\.title)).joined(separator: " ")
     }

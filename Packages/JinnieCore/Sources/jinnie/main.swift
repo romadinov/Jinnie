@@ -13,10 +13,13 @@ jinnie — personal knowledge agent
                                 --discover finds potential customers in general sales projects
   jinnie customers --scan <name>   read a customer's history (meetings, mail, documents, Slack)
   jinnie outlook-login          sign in to Outlook on the web (client Microsoft 365) in Jinnie's browser profile
-  jinnie recordings [--process] list recordings (speakers, status); --process reads pending transcripts
+  jinnie recordings [--process] [--moods] [--summarize <title>]
+                                list recordings; --process reads pending transcripts; --moods judges the tone of older ones
   jinnie remarkable-peek        list reMarkable notebooks and which ones are due for transcription
   jinnie remarkable [--since YYYY-MM-DD] [--limit N] [--only <name>]   transcribe notebooks (backfill / one notebook)
   jinnie outlook-peek           show what Jinnie can read from Outlook right now
+  jinnie teams-recordings [--days N] [--only "<title>"] [--list] [--capture "<title>" <out.m4a>]
+                                read Teams transcripts of meetings shared with you (skips ones Jinnie recorded)
   jinnie uberdoer               sync actions with Uberdoer
   jinnie import-projects        import projects from Uberdoer's work folder
   jinnie learn-contacts [days]  seed people from mail metadata (default 180 days)
@@ -113,6 +116,29 @@ case "customers":
     let noCustomer = dir.projects.filter { $0.customerID == nil && $0.status != .done }.map(\.name)
     if !noCustomer.isEmpty { print("No customer: " + noCustomer.joined(separator: ", ")) }
     exit(0)
+case "teams-recordings":
+    do {
+        let days = args.firstIndex(of: "--days").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil }
+        let only = args.firstIndex(of: "--only").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+        if let i = args.firstIndex(of: "--capture"), i + 2 < args.count {
+            // Records one recording's audio into a file (testing): --capture "<title>" <out.m4a>
+            let all = try OutlookReader().sharedRecordings(since: Date().addingTimeInterval(-Double(days ?? 14) * 86400))
+            guard let r = all.first(where: { "\($0.title) \(ISO8601DateFormatter().string(from: $0.start))".localizedCaseInsensitiveContains(args[i + 1]) }) else { print("No such recording"); exit(1) }
+            print("Recording \(r.title) (\(Int(r.duration / 60)) min)…")
+            var last = -1
+            try OutlookReader().captureAudio(playerURL: r.playerURL, duration: r.duration, to: URL(fileURLWithPath: args[i + 2])) { p in
+                let pct = Int(p * 100); if pct / 10 != last / 10 { print("\(pct)%"); last = pct }; return true
+            }
+            print("Saved \(args[i + 2])")
+        } else if args.contains("--list") {
+            for r in try OutlookReader().sharedRecordings(since: Date().addingTimeInterval(-Double(days ?? 7) * 86400)) {
+                print("\(r.start.formatted(date: .abbreviated, time: .shortened))  \(Int(r.duration / 60)) min  \(r.title)")
+            }
+        } else {
+            print(try agent.ingestTeamsRecordings(days: days, only: only))
+        }
+    } catch { print("Failed: \(error)") }
+    exit(0)
 case "outlook-login":
     do {
         let r = OutlookReader()
@@ -133,6 +159,20 @@ case "outlook-peek":
     exit(0)
 case "recordings":
     if rest.contains("--process") { await agent.processRecordings() }
+    if rest.contains("--moods") { await agent.assessMoods(limit: 20) }
+    if let i = rest.firstIndex(of: "--notes"), i + 1 < rest.count {
+        let recs = store.all(Recording.self).sorted { $0.startedAt > $1.startedAt }
+        guard let rec = recs.first(where: { $0.id == rest[i + 1] }) ?? recs.first(where: { $0.title.localizedCaseInsensitiveContains(rest[i + 1]) }) else { print("No such recording"); exit(1) }
+        do { let n = try await agent.generateMeetingNotes(rec.id); print("Subject: \(n.subject)\n\n\(n.body)") } catch { print("Failed: \(error)") }
+        exit(0)
+    }
+    if let i = rest.firstIndex(of: "--summarize"), i + 1 < rest.count {
+        let key = rest[i + 1]
+        let recs = store.all(Recording.self).sorted { $0.startedAt > $1.startedAt }
+        guard let rec = recs.first(where: { $0.id == key }) ?? recs.first(where: { $0.title.localizedCaseInsensitiveContains(key) }) else { print("No such recording"); exit(1) }
+        do { print(try await agent.summarizeRecording(rec.id)) } catch { print("Failed: \(error)") }
+        exit(0)
+    }
     let dir = Directory(store: store)
     for r in store.all(Recording.self).sorted(by: { $0.startedAt > $1.startedAt }) {
         print("[\(r.id)] \(r.status.rawValue)  \(Prompts_day(r.startedAt))  \(r.title)  \(Recording.clock(r.duration))\(r.processedAt == nil ? "" : "  (read)")")

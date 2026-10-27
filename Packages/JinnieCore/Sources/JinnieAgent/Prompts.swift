@@ -72,6 +72,9 @@ enum Prompts {
         "speaker":{"type":"string","description":"The label as in the transcript, e.g. 'Speaker 2'"},
         "person":{"type":"string","description":"Exact name from the directory, or 'You' for the owner"},
         "why":{"type":"string","description":"One short reason, e.g. 'is thanked by name and speaks for the client'"}}}},
+      "meetingMood":{"type":["object","null"],"description":"Recordings only: the tone of the meeting","required":["mood","why"],"properties":{
+        "mood":{"type":"string","enum":["positive","calm","tense","heated"]},
+        "why":{"type":"string","description":"One sentence: what made it so, e.g. 'Dana Fischer pushed back hard on the rollout plan; voices raised over scope'"}}},
       "newProjects":{"type":"array","items":{"type":"object","required":["name","isWork"],"properties":{
         "name":{"type":"string","description":"Short name, usually the client or initiative (e.g. 'Acme')"},
         "customer":{"type":"string","description":"The customer (client organisation) it is for: an existing name from CUSTOMERS, or a new one. For a presales opportunity, the prospective customer. Omit for internal work"},
@@ -221,7 +224,8 @@ enum Prompts {
     }
 
     static let toolDiscoverySchema = """
-    {"type":"object","required":["tools"],"properties":{"tools":{"type":"array","items":{"type":"string"}}}}
+    {"type":"object","required":["tools"],"properties":{"tools":{"type":"array","items":{"type":"string"}},
+      "account":{"type":["string","null"],"description":"The email of the account the connector uses, if found"}}}
     """
 
     static func isoString(_ d: Date) -> String {

@@ -76,9 +76,17 @@ public enum Setup {
         }
         let method = json["authMethod"] as? String ?? ""
         let plan = json["subscriptionType"] as? String
-        if method == "claude.ai" {
+        let email = json["email"] as? String
+        let org = json["orgName"] as? String
+        let mine = OwnerProfile.current.emails.map { $0.lowercased() }
+        if method == "claude.ai", let email, !mine.isEmpty, !mine.contains(email.lowercased()) {
+            // Connectors belong to a claude.ai account: signed in as someone else, Jinnie sees none of yours.
+            c.status = .warning
+            c.detail = "Signed in as \(email)\(org.map { " (\($0))" } ?? ""), not as you. Your claude.ai connectors (Gmail, Slack, Calendar, Drive) belong to your own account, so Jinnie can't use them."
+            c.steps = [.init("Sign in with your own Claude account:", command: "claude auth login")]
+        } else if method == "claude.ai" {
             c.status = .ok
-            c.detail = "Signed in\(plan.map { " · \($0.capitalized) plan" } ?? "")"
+            c.detail = "Signed in\(email.map { " as \($0)" } ?? "")\(plan.map { " · \($0.capitalized) plan" } ?? "")"
         } else {
             c.status = .warning
             c.detail = "Signed in with \(method): runs may be billed per use, and claude.ai connectors (Gmail, Slack…) are only available with a Claude account"
@@ -108,7 +116,7 @@ public enum Setup {
                 c.status = tools.isEmpty ? .missing : .ok
                 c.detail = tools.isEmpty
                     ? (agent.needsSignIn(source) ? "Added in claude.ai, but signed out or access expired. \(why)" : "Not connected in claude.ai. \(why)")
-                    : "Connected (\(tools.count) read-only tools)"
+                    : "Connected\(agent.connectorAccount(source).map { " as \($0)" } ?? "") (\(tools.count) read-only tools)"
             } else {
                 c.status = .warning
                 c.detail = "Couldn't check (is Claude Code signed in?)"

@@ -340,7 +340,9 @@ struct ProjectRow: View {
     let last: Date?
     var showCustomer = true
 
-    var body: some View {
+    var body: some View { rowContent.copyable({ project.name }, label: "Copy Name") }
+
+    @ViewBuilder var rowContent: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text(project.name).font(.body.weight(.semibold))
@@ -482,7 +484,9 @@ struct StakeholderRow: View {
     @Environment(AppModel.self) private var model
     let stakeholder: Stakeholder
 
-    var body: some View {
+    var body: some View { rowContent.copyable({ (model.person(stakeholder.personID) ?? model.directory.person(id: stakeholder.personID))?.name ?? "" }, label: "Copy Name") }
+
+    @ViewBuilder var rowContent: some View {
         if let person = model.person(stakeholder.personID) ?? model.directory.person(id: stakeholder.personID) {
             NavigationLink(value: Route.person(person.id)) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -584,9 +588,46 @@ struct PeopleView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            .textSelection(.disabled)
+            .contextMenu {
+                Button { Clipboard.copy(p.name) } label: { Label("Copy Name", systemImage: "doc.on.doc") }
+                if let e = p.emails.first { Button { Clipboard.copy(e) } label: { Label("Copy \(e)", systemImage: "envelope") } }
+            }
         }
         .searchable(text: $query)
         .navigationTitle("People")
+    }
+}
+
+/// The person in your Contacts: fill blanks from there, open the card (Mac), or add them.
+struct ContactsRow: View {
+    @Environment(AppModel.self) private var model
+    let person: Person
+    @State private var allowed = ContactsBridge.allowed
+    @State private var note: String?
+
+    var body: some View {
+        HStack(spacing: 14) {
+            if !allowed {
+                Button("Allow Contacts") { Task { allowed = await ContactsBridge.requestAccess() } }
+            } else if let c = ContactsBridge.contact(for: person) {
+                #if os(macOS)
+                Button { ContactsBridge.open(c) } label: { Label("Open in Contacts", systemImage: "person.crop.square") }
+                #endif
+                if let q = ContactsBridge.enriched(person) {
+                    Button { model.save(q); note = "Filled in from Contacts." } label: { Label("Fill In from Contacts", systemImage: "arrow.down.doc") }
+                } else {
+                    Label("In your Contacts", systemImage: "checkmark.circle").foregroundStyle(.secondary)
+                }
+            } else {
+                Button {
+                    do { try ContactsBridge.add(person); note = "Added to Contacts." } catch { note = "Couldn't add: \(error.localizedDescription)" }
+                } label: { Label("Add to Contacts", systemImage: "person.crop.circle.badge.plus") }
+            }
+            if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
+        }
+        .buttonStyle(.borderless)
+        .font(.callout)
     }
 }
 
@@ -608,6 +649,7 @@ struct PersonDetail: View {
                         HStack { Text("Projects"); Spacer(); ForEach(projects) { ProjectChip(name: $0.name) } }
                     }
                     if !p.notes.isEmpty { Text(p.notes) }
+                    ContactsRow(person: p)
                 }
                 let acts = model.actions(for: p).filter { model.isListed($0) }
                 if !acts.isEmpty {
@@ -836,7 +878,7 @@ enum Route: Hashable {
 extension View {
     func jinnieDestinations() -> some View {
         navigationDestination(for: Route.self) { route in
-            RouteView(route: route)
+            RouteView(route: route).textSelection(.enabled)
         }
     }
 }

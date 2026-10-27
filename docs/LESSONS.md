@@ -7,6 +7,9 @@ Things that cost time building Jinnie, and what to do instead.
   `--tools ""` removes ToolSearch, and with it every connector; use `--tools ToolSearch`. `--strict-mcp-config` drops the
   connectors as well. The stream-json `init` message lists only local MCP servers, so an empty list there doesn't mean the
   connectors are missing.
+- **Connectors belong to the claude.ai account Claude Code is signed into.** On 2026-10-26 Claude Code got signed in as
+  a shared team account; every connector then looked signed out to Jinnie. Setup shows the Claude Code account and each
+  connector's account ("Connected as …"), and warns when Claude Code isn't signed in as the owner.
 - **A signed-out connector looks like a quiet inbox.** claude.ai keeps listing it, ToolSearch answers "No matching deferred
   tools found", and the run returns 0 items with no error. Jinnie fails any run that needed connector tools, used none and
   got that answer, so the source shows as signed out (it went unnoticed for hours on 2026-10-26).
@@ -145,3 +148,31 @@ Things that cost time building Jinnie, and what to do instead.
   copied rather than reinvented.
 - **When a feature looks wrong to the user, read the data and the traces first.** "Not found in email" was a 7-day
   backfill. "Not reflected on the project" was a missing stakeholder concept. "Old estimate" was an unread revision.
+
+## Teams recordings shared with the owner: read the transcript, not the audio
+- SharePoint search (`/_api/search/query`, run with `fetch` inside the signed-in browser page) lists the recordings the owner
+  can open: `filetype:mp4 path:https://<tenant>-my.sharepoint.com` = files in colleagues' OneDrive shared through Teams chats.
+  The tenant comes from where stream.office.com redirects. `Created` is the recording start; `MediaDuration` is in seconds.
+- Download is blocked for non-organisers (403), and the player's DASH stream is AES-encrypted with a separately served key.
+  Don't decrypt it: that circumvents the tenant's protection. The player's transcript pane (speaker, time, text) is readable
+  by anyone who can watch; it is virtualised, so collect rendered entries and scroll until nothing new appears (~2.5 min/hour).
+- Google Meet recordings organised by another company (e.g. a vendor) live in their Drive and are usually not visible to
+  the owner's account at all, even as an invited guest.
+- `OutlookReader.profileDirectory` follows `JINNIE_HOME`. A scratch run starts the shared `jinnie-outlook` daemon with an
+  empty profile if the real one isn't running, and Jinnie's Outlook reads then fail until `agent-browser --session
+  jinnie-outlook close`. For scratch tests, symlink `<scratch>/outlook-browser` to the real profile.
+- Audio of a shared Teams recording: play it in the hidden browser and record the `<video>` element with
+  `captureStream()` + `MediaRecorder` (opus/webm), pulled out in base64 chunks by `eval`. This records what the player
+  outputs; nothing is decrypted. It works muted (`v.muted = true` still feeds captureStream), so nothing is audible and
+  a live meeting recording can't pick it up. `play()` needs a user gesture: `agent-browser click video` first.
+  Pause the recorder on the video's `waiting` event so the audio stays on the meeting's clock. When the video ends, the
+  page resets and `window` state is gone: pull every 2 s near the end and keep what was captured. Real time only, and
+  Outlook reads must wait (`browser.busyUntil`): both use the one `jinnie-outlook` browser.
+
+## Meeting notes by email, and Contacts
+- Jinnie never sends mail. "Send Meeting Notes" opens a filled-in draft: a `mailto:` URL opened with Mimestream
+  (`com.mimestream.Mimestream` registers `mailto`) via `NSWorkspace.open(_:withApplicationAt:)`, else the default mail app.
+  Percent-encode everything but unreserved characters, with line breaks as `%0D%0A` (RFC 6068). Round-trip tested
+  with `&`, `#`, quotes and Cyrillic.
+- Contacts fill blanks only (emails, organisation, job title), matched by email, then by a unique exact full name. Never
+  overwrite. "Add to Contacts" is the only write, and only on request.

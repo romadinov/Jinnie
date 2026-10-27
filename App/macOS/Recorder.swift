@@ -201,6 +201,12 @@ final class MeetingRecorder {
             let mic = try await Task.detached { try AudioProcessor.loadAudioAsFloatArray(fromPath: path) }.value
             let system = FileManager.default.fileExists(atPath: sysPath)
                 ? ((try? await Task.detached { try AudioProcessor.loadAudioAsFloatArray(fromPath: sysPath) }.value) ?? []) : []
+            // A call where nobody else spoke (you waited alone, or it was a false start): not worth transcribing.
+            // Only for call recordings with the meeting app's audio; recordings you start by hand are always kept.
+            if rec.app != nil, FileManager.default.fileExists(atPath: sysPath), Self.speechSeconds(system) < 5 {
+                discard(rec, why: "nobody else spoke")
+                return
+            }
             let samples = Self.mix(mic, system)
             guard samples.count > 16000 else { throw RecorderError.empty }
             rec.duration = Double(samples.count) / 16000
@@ -273,6 +279,34 @@ final class MeetingRecorder {
             store.save(rec)
             state = .failed(error.localizedDescription)
         }
+    }
+
+    /// Seconds of 30 ms frames loud enough to be someone talking (above about -40 dBFS) in 16 kHz audio.
+    /// A join chime or a notification sound stays well under the 5 s that count as someone speaking.
+    nonisolated static func speechSeconds(_ samples: [Float]) -> Double {
+        let frame = 480
+        var loud = 0
+        var i = 0
+        while i + frame <= samples.count {
+            var sum: Float = 0
+            for j in i..<(i + frame) { sum += samples[j] * samples[j] }
+            if (sum / Float(frame)).squareRoot() > 0.01 { loud += 1 }
+            i += frame
+        }
+        return Double(loud) * 0.03
+    }
+
+    /// Deletes a recording and its audio without transcribing it, and notes why in Activity.
+    private func discard(_ rec: Recording, why: String) {
+        let store = AppModel.shared.store
+        try? FileManager.default.removeItem(at: Self.audioURL(rec.id))
+        try? FileManager.default.removeItem(at: Self.systemURL(rec.id))
+        store.delete(rec)
+        var run = RunLog(kind: "recording")
+        run.message = "\(rec.title): not transcribed, \(why) (\(Recording.clock(rec.duration))); deleted"
+        run.finishedAt = Date()
+        store.save(run)
+        state = .idle
     }
 
     /// Microphone and meeting audio summed into one track for transcription and speaker separation.

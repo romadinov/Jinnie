@@ -106,6 +106,15 @@ extension Agent {
                                   tools: [], label: "ingest-outlook")
         let stats = apply(r.structured, source: .outlook, actionCutoff: first ? Date().addingTimeInterval(-30 * 86400) : nil)
         run.message = "\(inbox.count) inbox + \(sent.count) sent conversations, \(events.count) events → \(stats.description) · $\(String(format: "%.2f", r.costUSD))"
+        if readsTeamsRecordings {
+            do {
+                let teams = try ingestTeamsRecordings(reader: reader)
+                run.message += " · Teams: " + teams
+            } catch {
+                log("Teams recordings: \(error)")
+                run.message += " · Teams recordings failed: \(error)"
+            }
+        }
         log("Outlook: \(run.message)")
     }
 
@@ -148,7 +157,7 @@ extension Agent {
         let item = a.itemID.flatMap { store.get(Item.self, $0) }
         let project = Directory(store: store).project(id: a.projectID)
         var lines: [String] = []
-        if let url = item?.url { lines.append(url) }
+        if let url = item?.link { lines.append(url.absoluteString) }
         lines.append(a.jinnieURL)
         lines.append("")
         if let c = a.context, !c.isEmpty { lines.append(c); lines.append("") }

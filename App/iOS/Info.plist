@@ -16,6 +16,8 @@
 			<string>Any</string>
 		</dict>
 	</dict>
+	<key>NSContactsUsageDescription</key>
+	<string>Jinnie fills in people's emails and companies from your contacts, and adds people to Contacts when you ask.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Jinnie records voice notes and meetings you start, and transcribes them on this iPhone.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

@@ -14,6 +14,60 @@ final class AgentHooks {
     var status: () -> String = { "" }
 }
 
+/// Puts text on the clipboard (Mac and iPhone).
+enum Clipboard {
+    static func copy(_ text: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #else
+        UIPasteboard.general.string = text
+        #endif
+    }
+}
+
+extension View {
+    /// Right-click (Mac) or long-press (iPhone) → Copy: for rows, whose clicks open things rather than select text.
+    func copyable(_ text: @escaping () -> String, label: String = "Copy") -> some View {
+        textSelection(.disabled)  // rows open things on click; selectable text would swallow the click
+            .contextMenu {
+                Button { Clipboard.copy(text()) } label: { Label(label, systemImage: "doc.on.doc") }
+            }
+    }
+}
+
+/// "Select All & Copy": copies the whole text, and says so for a moment.
+struct CopyAllButton: View {
+    let text: () -> String
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            Clipboard.copy(text())
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+        } label: {
+            Label(copied ? "Copied" : "Select All & Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(.borderless)
+    }
+}
+
+extension Item {
+    /// What Jinnie learned from this item, as plain text for copying.
+    func learnedText(people: [Person], actions: [Action]) -> String {
+        var out = [title, occurredAt.formatted(date: .complete, time: .shortened) + (author.map { " · \($0)" } ?? "")]
+        if let link { out.append(link.absoluteString) }
+        if !summary.isEmpty { out += ["", summary] }
+        if !facts.isEmpty { out += ["", "Facts:"] + facts.map { "• \($0)" } }
+        if !people.isEmpty { out += ["", "People: " + people.map(\.display).joined(separator: ", ")] }
+        if !actions.isEmpty { out += ["", "Actions:"] + actions.map { "• \($0.title)" } }
+        if let docs = documents, !docs.isEmpty { out += ["", "Documents:"] + docs.map { "• \($0.title): \($0.url)" } }
+        if let text, !text.isEmpty { out += ["", text] } else if !excerpt.isEmpty { out += ["", "“\(excerpt)”"] }
+        return out.joined(separator: "\n")
+    }
+}
+
 /// Rotating disclosure chevron, as in Uberdoer.
 struct Chevron: View {
     let open: Bool
@@ -105,17 +159,49 @@ struct SourceBadge: View {
     }
 }
 
+/// Where a task or headline came from, as a small chip that opens it there (Slack thread, email, meeting…).
+/// Items with nowhere to open (notes, handwriting, recordings) open their details in Jinnie.
+struct SourceLink: View {
+    @Environment(\.openURL) private var openURL
+    let item: Item
+    var showAuthor = true
+
+    var body: some View {
+        let label = HStack(spacing: 3) {
+            Image(systemName: item.source.symbol)
+            Text([item.source.label, showAuthor ? item.author.map { $0.split(separator: " ").first.map(String.init) ?? $0 } : nil]
+                .compactMap { $0 }.joined(separator: " · "))
+                .lineLimit(1)
+            if item.link != nil { Image(systemName: "arrow.up.right").imageScale(.small) }
+        }
+        .font(.caption)
+        .foregroundStyle(.tint)
+        .help("\(item.title) · \(item.occurredAt.formatted(.dateTime.day().month(.abbreviated)))")
+        if let url = item.link {
+            Button { openURL(url) } label: { label }.buttonStyle(.borderless)
+        } else {
+            NavigationLink(value: Route.item(item.id)) { label }.buttonStyle(.borderless)
+        }
+    }
+}
+
 struct ItemRow: View {
     @Environment(AppModel.self) private var model
     let item: Item
 
-    var body: some View {
+    var body: some View { rowContent.copyable({ item.title }, label: "Copy Title") }
+
+    @ViewBuilder var rowContent: some View {
         let open = model.expandedRows.contains(item.id)
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Chevron(open: open)
                 SourceBadge(source: item.source)
                 Text(item.title).font(.body.weight(.medium)).lineLimit(open ? 3 : 1)
+                // A recorded meeting (or its calendar entry) shows its tone: red when heated.
+                if let rec = model.recordings.first(where: { $0.itemID == item.id || $0.meetingItemID == item.id || (item.source == .recording && $0.id == item.sourceRef) }) {
+                    MoodBadge(recording: rec)
+                }
                 Spacer()
                 Text(item.occurredAt, format: .dateTime.day().month(.abbreviated).hour().minute())
                     .font(.caption).foregroundStyle(.secondary)
@@ -134,6 +220,8 @@ struct ItemRow: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        // Clicks open the row; selectable text would swallow them (Copy is in the context menu; the opened panel is selectable).
+        .textSelection(.disabled)
         .onTapGesture { withAnimation(.snappy(duration: 0.15)) { model.toggleRow(item.id) } }
     }
 }
@@ -167,10 +255,11 @@ struct ItemPanel: View {
             let actions = model.actions.filter { $0.itemID == item.id }
             ForEach(actions) { ActionRow(action: $0) }
             HStack(spacing: 14) {
-                if let s = item.url, let url = URL(string: s) {
+                if let url = item.link {
                     Button { openURL(url) } label: { Label("Open in \(item.source.label)", systemImage: "arrow.up.right.square") }
                 }
                 NavigationLink(value: Route.item(item.id)) { Label("Details", systemImage: "info.circle") }
+                CopyAllButton { item.learnedText(people: item.personIDs.compactMap { model.person($0) }, actions: actions) }
             }
             .buttonStyle(.borderless)
             .font(.callout)
@@ -185,7 +274,9 @@ struct NewsRow: View {
     let news: NewsItem
     var project: Project? = nil
 
-    var body: some View {
+    var body: some View { rowContent.copyable({ [news.headline, news.detail].compactMap { $0 }.joined(separator: "\n") }, label: "Copy Headline") }
+
+    @ViewBuilder var rowContent: some View {
         let key = "news." + (project?.id ?? "") + news.date + news.headline
         let open = model.expandedRows.contains(key)
         VStack(alignment: .leading, spacing: 4) {
@@ -201,12 +292,22 @@ struct NewsRow: View {
                 if let d = news.detail { Text(d).font(.callout).foregroundStyle(.secondary).lineLimit(open ? nil : 2) }
             }
             .padding(.leading, 22)
+            let sources = news.itemIDs.compactMap { model.item($0) }
+            if !open, !sources.isEmpty {
+                HStack(spacing: 10) {
+                    ForEach(sources.prefix(4)) { SourceLink(item: $0) }
+                    if sources.count > 4 { Text("+\(sources.count - 4)").font(.caption).foregroundStyle(.secondary) }
+                }
+                .padding(.leading, 22)
+            }
             if open {
                 ForEach(news.itemIDs.compactMap { model.item($0) }) { ItemRow(item: $0) }
                     .padding(.leading, 22)
             }
         }
         .contentShape(Rectangle())
+        // Clicks open the row; selectable text would swallow them (Copy is in the context menu; the opened panel is selectable).
+        .textSelection(.disabled)
         .onTapGesture { withAnimation(.snappy(duration: 0.15)) { model.toggleRow(key) } }
     }
 
@@ -243,9 +344,11 @@ struct ItemDetail: View {
                 HStack(spacing: 12) {
                     Text(item.occurredAt, format: .dateTime.weekday().day().month().year().hour().minute())
                     if let a = item.author { Text(a) }
-                    if let urlString = item.url, let url = URL(string: urlString) {
+                    if let url = item.link {
                         Button("Open in \(item.source.label)") { openURL(url) }.buttonStyle(.borderless)
                     }
+                    CopyAllButton { item.learnedText(people: item.personIDs.compactMap { model.person($0) },
+                                                     actions: model.actions.filter { $0.itemID == item.id }) }
                 }
                 .font(.callout).foregroundStyle(.secondary)
                 if !item.summary.isEmpty { Text(item.summary) }
@@ -294,7 +397,9 @@ struct DocumentRow: View {
     let doc: DocLink
     var date: Date?
 
-    var body: some View {
+    var body: some View { rowContent.copyable({ "\(doc.title)\n\(doc.url)" }, label: "Copy Title and Link") }
+
+    @ViewBuilder var rowContent: some View {
         Button {
             if let url = URL(string: doc.url) { openURL(url) }
         } label: {
@@ -336,6 +441,8 @@ struct ActionRow: View {
             details
         }
         .contentShape(Rectangle())
+        // Clicks open the row; selectable text would swallow them (Copy is in the context menu; the opened panel is selectable).
+        .textSelection(.disabled)
         .onTapGesture { withAnimation(.snappy(duration: 0.15)) { model.toggleRow(action.id) } }
         #if os(iOS)
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
@@ -356,10 +463,13 @@ struct ActionRow: View {
             } else {
                 Button("Reopen") { model.setStatus(action, .open) }
             }
-            if let item = model.item(action.itemID), let s = item.url, let url = URL(string: s) {
+            if let item = model.item(action.itemID), let url = item.link {
                 Link("Open source (\(item.source.label))", destination: url)
             }
             if let url = action.uberdoerURL { Link("Open in Uberdoer", destination: url) }
+            Divider()
+            Button { Clipboard.copy(action.title) } label: { Label("Copy", systemImage: "doc.on.doc") }
+            if let who = model.personName(action) { Button { Clipboard.copy(who) } label: { Label("Copy “\(who)”", systemImage: "person") } }
         }
     }
 
@@ -387,7 +497,7 @@ struct ActionRow: View {
                     } else if let e = action.syncError {
                         Image(systemName: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange).help(e)
                     }
-                    if let item = model.item(action.itemID) { SourceBadge(source: item.source).font(.caption) }
+                    if let item = model.item(action.itemID) { SourceLink(item: item) }
                 }
                 if open { ActionPanel(action: action).padding(.top, 6) }
             }
@@ -426,7 +536,7 @@ struct ActionPanel: View {
                 ForEach((item.documents ?? []).prefix(4), id: \.url) { DocumentRow(doc: $0) }
             }
             HStack(spacing: 14) {
-                if let item = model.item(action.itemID), let s = item.url, let url = URL(string: s) {
+                if let item = model.item(action.itemID), let url = item.link {
                     Button { openURL(url) } label: { Label("Source", systemImage: "arrow.up.right.square") }
                 }
                 if let url = action.uberdoerURL {
@@ -479,7 +589,7 @@ struct ActionDetail: View {
                 if let item = model.item(a.itemID) {
                     Section("Source") {
                         ItemRow(item: item)
-                        if let s = item.url, let url = URL(string: s) {
+                        if let url = item.link {
                             Button { openURL(url) } label: { Label("Open in \(item.source.label)", systemImage: "arrow.up.right.square") }
                         }
                         ForEach(item.documents ?? [], id: \.url) { DocumentRow(doc: $0) }

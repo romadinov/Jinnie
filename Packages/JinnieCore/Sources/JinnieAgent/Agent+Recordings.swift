@@ -31,15 +31,16 @@ extension Agent {
         let dir = Directory(store: store)
         let names = rec.speakers.filter { $0.talkSeconds >= 1 }.map { s -> String in
             let n = rec.name(of: s.label, in: dir)
-            return n == "You" ? "You (the owner, \(JinnieConfig.ownerName))" : (dir.person(id: s.personID)?.display ?? n + " (not identified yet)")
+            return n == "You" ? "You (the owner, \(JinnieConfig.ownerName))" : (dir.person(id: s.personID)?.display ?? s.name ?? n + " (not identified yet)")
         }
         let meeting = rec.meetingItemID.flatMap { store.get(Item.self, $0) }
         let end = rec.startedAt.addingTimeInterval(rec.duration)
         let glossary = Set(store.all(Recording.self).flatMap { $0.corrections ?? [] }.filter { $0.remember == true }.map(\.to))
             .sorted().joined(separator: ", ")
         let task = """
-        Below is the transcript of a conversation the owner recorded on \(Prompts.isoString(rec.startedAt)) \
-        (\(Int(rec.duration / 60)) min, until \(Prompts.isoString(end))), transcribed and separated by speaker on the owner's Mac. \
+        \(rec.isExternal
+            ? "Below is the transcript Microsoft Teams made of a meeting recorded on \(Prompts.isoString(rec.startedAt)) (\(Int(rec.duration / 60)) min, until \(Prompts.isoString(end))). It was shared with the owner, who was most likely not in it: nothing in it is the owner's own commitment unless \"You\" speak. Speaker names come from Teams."
+            : "Below is the transcript of a conversation the owner recorded on \(Prompts.isoString(rec.startedAt)) (\(Int(rec.duration / 60)) min, until \(Prompts.isoString(end))), transcribed and separated by speaker on the owner's Mac.") \
         \(meeting.map { "It was most likely the calendar meeting \"\($0.title)\" (item \($0.id))." } ?? "")
         Speakers: \(names.joined(separator: "; ")).
         Transcription can mishear names and terms (the owner speaks \(OwnerProfile.current.languages)): use the directory to read them correctly. \
@@ -57,6 +58,10 @@ extension Agent {
         speakerGuesses: for each speaker marked "not identified", say who they most likely are when the content makes it \
         reasonably clear (they're addressed by name, introduce themselves, speak for a company or in a known role, or reply \
         to the owner by name). Use exact directory names, or "You" for the owner. Skip speakers you can't place.
+
+        meetingMood: the tone. "heated" = open conflict: raised voices, blame, people talking over each other, sharp \
+        pushback or frustration; "tense" = visible disagreement or pressure, but civil; "calm" = businesslike; "positive" = \
+        warm, agreement, good news. Judge from what is said (the transcript has no voices), and say why in one sentence.
 
         TRANSCRIPT:
         \(rec.transcript(dir))
@@ -93,10 +98,155 @@ extension Agent {
             fresh.speakers[i].suggestedPersonID = person.id
             fresh.speakers[i].suggestionWhy = (g["why"] as? String)?.nilIfEmpty
         }
+        if let m = (r.structured as? [String: Any])?["meetingMood"] as? [String: Any], let mood = m["mood"] as? String {
+            fresh.mood = mood
+            fresh.moodWhy = (m["why"] as? String)?.nilIfEmpty
+        }
         fresh.processedAt = Date()
         store.save(fresh)
         log("Recording \(fresh.title): \(stats.description) · $\(String(format: "%.2f", r.costUSD))")
         return stats
+    }
+
+    static let moodSchema = #"{"type":"object","required":["mood","why"],"properties":{"mood":{"type":"string","enum":["positive","calm","tense","heated"]},"why":{"type":"string"}}}"#
+
+    /// The tone of recordings read before Jinnie judged moods (a few per cycle).
+    public func assessMoods(limit: Int = 3) async {
+        let dir = Directory(store: store)
+        for rec in store.all(Recording.self).filter({ $0.processedAt != nil && $0.mood == nil && !$0.segments.isEmpty })
+            .sorted(by: { $0.startedAt > $1.startedAt }).prefix(limit) {
+            var call = Claude.Call(prompt: """
+            What was the tone of this meeting? "heated" = open conflict: raised voices, blame, people talking over each other, \
+            sharp pushback or frustration; "tense" = visible disagreement or pressure, but civil; "calm" = businesslike; \
+            "positive" = warm, agreement, good news. Judge from what is said (there are no voices), and say why in one sentence, \
+            naming who.
+
+            "\(rec.title)", \(Prompts.isoString(rec.startedAt)):
+            \(rec.transcript(dir))
+            """)
+            call.strictMCP = true
+            call.mcpConfig = #"{"mcpServers":{}}"#
+            call.model = Agent.routineModel
+            call.jsonSchema = Agent.moodSchema
+            call.label = "recording-mood"
+            call.timeout = 600
+            do {
+                let r = try await claude.run(call)
+                guard let o = r.structured as? [String: Any], let mood = o["mood"] as? String else { continue }
+                var fresh = store.get(Recording.self, rec.id) ?? rec
+                fresh.mood = mood
+                fresh.moodWhy = (o["why"] as? String)?.nilIfEmpty
+                store.save(fresh)
+                log("Mood of \(rec.title): \(mood) · $\(String(format: "%.2f", r.costUSD))")
+            } catch { log("Mood of \(rec.title) failed: \(error)") }
+        }
+    }
+
+    /// Summarises the recordings someone asked for (from either device).
+    public func summarizeRequestedRecordings() async {
+        for rec in store.all(Recording.self) where rec.summaryPending && !rec.segments.isEmpty {
+            do { try await summarizeRecording(rec.id) } catch { log("Summary of \(rec.title) failed: \(error)") }
+        }
+        for rec in store.all(Recording.self) where rec.notesPending && !rec.segments.isEmpty {
+            do { try await generateMeetingNotes(rec.id) } catch { log("Meeting notes for \(rec.title) failed: \(error)") }
+        }
+    }
+
+    static let notesSchema = #"{"type":"object","required":["subject","body"],"properties":{"subject":{"type":"string"},"body":{"type":"string"}}}"#
+
+    /// Meeting notes the owner can send to the participants: a subject and a plain-text email body.
+    @discardableResult
+    public func generateMeetingNotes(_ id: String) async throws -> (subject: String, body: String) {
+        guard let rec = store.get(Recording.self, id) else { throw ClaudeError(message: "No such recording") }
+        let dir = Directory(store: store)
+        let meeting = rec.meetingItemID.flatMap { store.get(Item.self, $0) }
+        let attendees = Set((meeting?.personIDs ?? []) + rec.speakers.compactMap(\.personID) + (rec.participantIDs ?? []))
+            .compactMap { dir.person(id: $0) }.map { $0.isMe ? "\($0.name) (the owner, sender)" : $0.name }
+        var call = Claude.Call(prompt: """
+        Write meeting notes that \(JinnieConfig.ownerName) (the owner, shown as "You" in the transcript) will email to the \
+        participants after this meeting: "\(rec.title)", \(Prompts.isoString(rec.startedAt)), \(Int(rec.duration / 60)) min.
+        Participants: \(attendees.isEmpty ? "see the transcript" : attendees.joined(separator: ", ")).\(rec.isExternal && !rec.speakers.contains(where: { dir.person(id: $0.personID)?.isMe == true }) ? "\nThe owner was NOT in this meeting (Teams shared the recording with them): don't list them as an attendee, and open with a line saying they are sharing the notes from the recording." : "")
+        The transcript was made automatically and can mishear names and terms: use the directory to read them right.
+
+        subject: "Meeting notes: <short topic> (<day, e.g. 27 Oct>)".
+        body: plain text, no Markdown (no asterisks or #), ready to paste into an email. In the language the meeting was \
+        held in. Structure:
+        - one opening line ("Hi all," or "Hi <name>," for two people) and one line saying these are the notes from the call;
+        - "Attendees:" names;
+        - "Summary:" 2-4 sentences;
+        - "Decisions:" lines starting with "- ";
+        - "Action items:" lines "- <Owner>: <what> (by <date>)" (omit the date if none was said), only what someone took on;
+        - "Open questions:" if any;
+        - a short closing line, then the owner's first name.
+        Neutral and factual, as the participants would agree it happened: no opinions about people, no internal remarks, \
+        nothing said privately or off-topic. Leave out a section that would be empty.
+
+        DIRECTORY:
+        \(dir.promptText)
+
+        TRANSCRIPT:
+        \(rec.transcript(dir))
+        """)
+        call.systemPrompt = Prompts.system
+        call.strictMCP = true
+        call.mcpConfig = #"{"mcpServers":{}}"#
+        call.model = Agent.routineModel
+        call.jsonSchema = Agent.notesSchema
+        call.label = "meeting-notes"
+        call.timeout = 900
+        let r = try await claude.run(call)
+        guard let o = r.structured as? [String: Any], let subject = o["subject"] as? String, let body = o["body"] as? String,
+              !body.isEmpty else { throw ClaudeError(message: "No meeting notes: \(r.text.prefix(200))") }
+        var fresh = store.get(Recording.self, id) ?? rec
+        fresh.notesSubject = subject
+        fresh.notes = body
+        fresh.notesAt = Date()
+        store.save(fresh)
+        log("Meeting notes for \(fresh.title) · $\(String(format: "%.2f", r.costUSD))")
+        return (subject, body)
+    }
+
+    /// A readable summary of a recording: overview, decisions, action items with owners, open questions.
+    @discardableResult
+    public func summarizeRecording(_ id: String) async throws -> String {
+        guard let rec = store.get(Recording.self, id) else { throw ClaudeError(message: "No such recording") }
+        let dir = Directory(store: store)
+        let meeting = rec.meetingItemID.flatMap { store.get(Item.self, $0) }
+        let projects = (meeting?.projectIDs ?? []).compactMap { dir.project(id: $0)?.name }
+        var call = Claude.Call(prompt: """
+        Summarise this meeting for \(JinnieConfig.ownerName) (the owner, shown as "You" if they spoke\(rec.isExternal ? "; they were most likely not in it" : "")).
+        Meeting: "\(rec.title)", \(Prompts.isoString(rec.startedAt)), \(Int(rec.duration / 60)) min.\(projects.isEmpty ? "" : " Project: \(projects.joined(separator: ", ")).")
+        The transcript was made automatically and can mishear names and terms: use the directory below to read them right.
+
+        Write Markdown, in English, with these sections (leave out a section that would be empty):
+        **Overview**: 2-4 sentences: what the meeting was for and where it ended up.
+        **Key points**: bullets, each attributed to the speaker by name where it matters.
+        **Decisions**: bullets.
+        **Action items**: bullets, "Owner: what (by when)", only what someone actually took on.
+        **Open questions and risks**: bullets.
+        Be concrete (names, numbers, systems, dates); no filler. Reply with the summary only.
+
+        DIRECTORY:
+        \(dir.promptText)
+
+        TRANSCRIPT:
+        \(rec.transcript(dir))
+        """)
+        call.systemPrompt = Prompts.system
+        call.strictMCP = true
+        call.mcpConfig = #"{"mcpServers":{}}"#
+        call.model = Agent.routineModel
+        call.label = "recording-summary"
+        call.timeout = 900
+        let r = try await claude.run(call)
+        let text = r.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw ClaudeError(message: "Empty summary") }
+        var fresh = store.get(Recording.self, id) ?? rec
+        fresh.summary = text
+        fresh.summaryAt = Date()
+        store.save(fresh)
+        log("Summarised \(fresh.title) · $\(String(format: "%.2f", r.costUSD))")
+        return text
     }
 
     /// The calendar meeting a recording most likely was: one that overlaps its start (±15 min).

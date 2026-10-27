@@ -365,7 +365,7 @@ struct MCPServer {
 
     func itemJSON(_ i: Item, _ dir: Directory, full: Bool) -> [String: Any] {
         var o: [String: Any] = ["type": "item", "id": i.id, "source": i.source.rawValue, "title": i.title, "date": iso(i.occurredAt),
-                                "summary": i.summary, "url": i.url ?? "", "from": [i.author, i.authorEmail].compactMap { $0 }.joined(separator: " "),
+                                "summary": i.summary, "url": i.link?.absoluteString ?? "", "from": [i.author, i.authorEmail].compactMap { $0 }.joined(separator: " "),
                                 "projects": i.projectIDs.compactMap { dir.project(id: $0)?.name }]
         if let docs = i.documents, !docs.isEmpty {
             o["documents"] = docs.map { ["title": $0.title, "url": $0.url, "kind": $0.kind ?? ""] }
@@ -413,7 +413,7 @@ struct MCPServer {
     func actionJSON(_ a: Action, _ dir: Directory) -> [String: Any] {
         ["type": "action", "id": a.id, "kind": a.kind.rawValue, "title": a.title, "status": a.status.rawValue, "due": a.due ?? "",
          "person": dir.person(id: a.personID)?.display ?? a.personName ?? "", "project": dir.project(id: a.projectID)?.name ?? "",
-         "source": a.itemID.flatMap { store.get(Item.self, $0) }.map { "\($0.source.label): \($0.title) (\($0.url ?? $0.id))" } ?? "",
+         "source": a.itemID.flatMap { store.get(Item.self, $0) }.map { "\($0.source.label): \($0.title) (\($0.link?.absoluteString ?? $0.id))" } ?? "",
          "created": iso(a.createdAt)]
     }
 }

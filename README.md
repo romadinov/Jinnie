@@ -37,7 +37,13 @@ It runs on the Claude subscription through headless `claude -p`, so no API key i
 - **Customers group projects.** One client organisation can have several projects. A new project names its customer
   when it is extracted; projects from before were grouped once by the model (`jinniectl customers --assign` re-runs it).
   Internal work has no customer. The Customers screen shows each customer's projects, news, actions, people and documents.
-- **Contacts** are learned from 6 months of mail headers on the first run.
+- **Contacts** are learned from 6 months of mail headers on the first run. After every sync, missing emails, companies and
+  job titles are filled in from the macOS/iOS Contacts (blanks only); a person's page can open or add their contact card.
+- **Recordings.** Calls are transcribed on the Mac; a call where nobody else spoke is deleted untranscribed. Each recording
+  gets a mood (heated ones show red), a summary on request, and meeting notes that open as a filled-in email in Mimestream
+  (or Mail). Jinnie never sends. Teams recordings shared with you are read through the player's transcript; **Record Audio**
+  plays one muted in Jinnie's browser and transcribes the sound with Whisper (opt-in, real time).
+- **Sources link back.** Tasks and news show chips that open the Slack thread, email or meeting they came from.
 - **History.** Regular runs read only what is new. **Scan History** reads a project's last 6 months: threads with its
   names, domains and people, plus meetings, documents and Slack. A scan runs automatically before a summary if the last
   one is more than 6 hours old. `scan --full` re-reads everything. A scan never skips a thread where a number or date is

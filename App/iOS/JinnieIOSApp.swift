@@ -51,6 +51,7 @@ struct IOSRoot: View {
                         if s == .projects { ProjectsAndCustomers() } else { s.view }
                     }
                     .jinnieDestinations()
+                    .textSelection(.enabled)
                         .toolbar {
                             if s == .today {
                                 if ImprovementNoteRequest.isAvailable {

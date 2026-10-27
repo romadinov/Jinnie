@@ -93,6 +93,8 @@ public final class Agent: @unchecked Sendable {
             do { try await discoverProspects() } catch { log("Prospects: \(error)") }
         }
         await summarizeRequested()
+        await summarizeRequestedRecordings()
+        await assessMoods()
         await refreshSummaries()
         await enrichActions()
         syncUberdoer()  // actions found by first-time project scans; richer notes
@@ -160,6 +162,13 @@ public final class Agent: @unchecked Sendable {
         store.save(run)
         let started = Date()
         do {
+            if source == .outlook, let busy = browserBusyUntil {
+                // Not counted as a read: the next sync reads from where the last real one ended.
+                run.message = "Waiting: the browser is recording a Teams meeting's audio (until about \(busy.formatted(date: .omitted, time: .shortened)))"
+                run.finishedAt = Date()
+                store.save(run)
+                return
+            }
             if source == .outlook || source == .remarkable {
                 if source == .outlook { try await ingestOutlook(&run) } else { try await ingestRemarkable(&run) }
                 setLastRun(source, started)
@@ -518,12 +527,18 @@ public final class Agent: @unchecked Sendable {
     public func tools(for source: Source, refresh: Bool = false) async throws -> [String] {
         guard let prefix = Agent.serverPrefixes[source] else { return [] }  // e.g. Outlook: read by OutlookReader, not a connector
         let key = "tools.\(source.rawValue)"
-        // Cached for a day, including "none" (a connector that isn't connected isn't re-checked every cycle).
+        // Cached for a day; "none" only for 20 minutes, so a connector that comes back (signed in again) is used soon.
         if !refresh, let cached = store.meta(key), let at = store.meta(key + ".at").flatMap(Double.init),
-           Date().timeIntervalSince1970 - at < 86400 {
-            return cached.split(separator: ",").map(String.init)
+           Date().timeIntervalSince1970 - at < (cached.isEmpty ? 1200 : 86400) {
+            return cached.split(separator: ",").map(String.init).filter { !$0.isEmpty }
         }
-        var call = Claude.Call(prompt: "Use ToolSearch (query \"+\(prefix.dropFirst("mcp__claude_ai_".count).dropLast(2))\", max_results 60; try other queries if needed) to find every deferred tool whose name starts with `\(prefix)`. Return all exact names. Do not call those tools.")
+        let probe = Agent.accountProbes[source]
+        var call = Claude.Call(prompt: """
+        Use ToolSearch (query "+\(prefix.dropFirst("mcp__claude_ai_".count).dropLast(2))", max_results 60; try other queries if needed) \
+        to find every deferred tool whose name starts with `\(prefix)`. Return all exact names. Do not call those tools\
+        \(probe.map { ", except one call to find which account the connector uses: \($0.how) Return that email address as `account`." } ?? ".")
+        """)
+        if let probe { call.allowedTools = [prefix + probe.tool] }
         call.jsonSchema = Prompts.toolDiscoverySchema
         call.label = "tools-\(source.rawValue)"
         call.model = Agent.routineModel
@@ -537,9 +552,22 @@ public final class Agent: @unchecked Sendable {
         }
         store.setMeta(key, readOnly.joined(separator: ","))
         store.setMeta(key + ".at", String(Date().timeIntervalSince1970))
-        log("\(source.label) read-only tools: \(readOnly.joined(separator: ", "))")
+        let account = ((r.structured as? [String: Any])?["account"] as? String)?.trimmingCharacters(in: .whitespaces)
+        store.setMeta(key + ".account", readOnly.isEmpty ? nil : account?.nilIfEmpty)
+        log("\(source.label) read-only tools: \(readOnly.joined(separator: ", "))\(account.map { " · account \($0)" } ?? "")")
         return readOnly
     }
+
+    /// The account a connector is connected to (from the last tool discovery), e.g. which Gmail Jinnie reads.
+    public func connectorAccount(_ source: Source) -> String? { store.meta("tools.\(source.rawValue).account") }
+
+    /// One read-only call per connector that reveals the account it uses.
+    static let accountProbes: [Source: (tool: String, how: String)] = [
+        .email: ("search_threads", "search_threads with query \"in:sent\" and 1 result; the sender (From) address of that message is the account."),
+        .calendar: ("list_calendars", "list_calendars; the primary calendar's id is the account."),
+        .drive: ("list_recent_files", "list_recent_files with 5 results; the owner email of a file owned by the user is the account."),
+        .slack: ("slack_read_user_profile", "slack_read_user_profile for yourself (no user id); the profile email is the account (add the workspace name in brackets if shown)."),
+    ]
 
     // MARK: - MCP config for retrieval
 

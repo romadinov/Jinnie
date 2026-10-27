@@ -395,3 +395,20 @@ func tempStore() throws -> Store {
     #expect(r.removeHallucinations() == 1)
     #expect(r.segments.map(\.text) == ["Thanks.", "Subtitles aside, MACD is up."])
 }
+
+@Test func mergingSpeakersJoinsTheirLines() {
+    var r = Recording(title: "Follow-up")
+    var a = RecordedSpeaker(label: 0); a.talkSeconds = 30; a.personID = "dana"
+    var b = RecordedSpeaker(label: 1); b.talkSeconds = 10
+    var c = RecordedSpeaker(label: 2); c.talkSeconds = 20
+    r.speakers = [a, b, c]
+    r.segments = [RecordedSegment(speaker: 0, start: 0, end: 30, text: "Hello."),
+                  RecordedSegment(speaker: 1, start: 30, end: 40, text: "Same person, other mic."),
+                  RecordedSegment(speaker: 2, start: 40, end: 60, text: "Someone else.")]
+    r.mergeSpeaker(1, into: 0)
+    #expect(r.speakers.map(\.label) == [0, 2])
+    #expect(r.speakers[0].talkSeconds == 40)
+    #expect(r.speakers[0].personID == "dana")
+    #expect(r.segments.map(\.speaker) == [0, 0, 2])
+    #expect(r.turns.count == 2)  // the split person's lines now read as one turn
+}

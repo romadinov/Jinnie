@@ -34,8 +34,44 @@ public struct Recording: Entity {
     public var participantIDs: [String]?
     /// Word fixes made by the owner ("Innitek" → "Initech"); remembered ones are applied to every new transcript.
     public var corrections: [TranscriptCorrection]?
+    /// A recording Jinnie read rather than made, e.g. "teams:<file id>" for a Teams meeting shared with the owner.
+    public var externalID: String?
+    /// Where to watch it (the Stream player), for an external recording.
+    public var sourceURL: String?
+    /// For an external recording: the owner asked the Mac to record its audio (by playing it in the hidden browser).
+    public var audioRequestedAt: Date?
+    /// When that audio was recorded and transcribed on the Mac, or why it failed.
+    public var audioAt: Date?
+    public var audioError: String?
+    /// The Mac's own (Whisper) transcript of that audio, kept beside the Teams one; speakers taken from Teams by time.
+    public var localSegments: [RecordedSegment]?
+
+    public var audioPending: Bool { audioRequestedAt.map { $0 > (audioAt ?? .distantPast) } ?? false && audioError == nil }
+
+    /// A written summary of the meeting (Markdown), made on request.
+    public var summary: String?
+    public var summaryAt: Date?
+    /// Set from either device; the Mac summarises on its next quick run.
+    public var summaryRequestedAt: Date?
+
+    /// The tone of the meeting, judged from the transcript: positive, calm, tense or heated; and why.
+    public var mood: String?
+    public var moodWhy: String?
+    public var isHeated: Bool { mood == "heated" }
+
+    /// Meeting notes to send to the participants (plain text, with a subject), made on request.
+    public var notesSubject: String?
+    public var notes: String?
+    public var notesAt: Date?
+    public var notesRequestedAt: Date?
+    public var notesPending: Bool { notesRequestedAt.map { $0 > (notesAt ?? .distantPast) } ?? false }
+
+    public var summaryPending: Bool { summaryRequestedAt.map { $0 > (summaryAt ?? .distantPast) } ?? false }
 
     public init(title: String) { self.title = title }
+
+    /// Transcribed elsewhere (Teams), with speaker names from there.
+    public var isExternal: Bool { externalID != nil }
 
     public var searchText: String { ([title] + segments.map(\.text)).joined(separator: " ") }
 
@@ -45,13 +81,30 @@ public struct Recording: Entity {
         return Array(mine.prefix(max).map(\.start))
     }
 
+    /// One person split into two voices: `from`'s lines become `into`'s, talk time adds up, `from` goes.
+    public mutating func mergeSpeaker(_ from: Int, into: Int) {
+        guard from != into, let i = speakers.firstIndex(where: { $0.label == from }),
+              let k = speakers.firstIndex(where: { $0.label == into }) else { return }
+        for j in segments.indices where segments[j].speaker == from { segments[j].speaker = into }
+        for j in (localSegments ?? []).indices where localSegments![j].speaker == from { localSegments![j].speaker = into }
+        let a = speakers[i], b = speakers[k]
+        if b.personID == nil, let p = a.personID { speakers[k].personID = p; speakers[k].namedBy = a.namedBy }
+        if let ea = a.embedding, let eb = b.embedding, ea.count == eb.count {
+            let wa = Float(a.talkSeconds), wb = Float(b.talkSeconds), w = max(wa + wb, 1)
+            speakers[k].embedding = zip(ea, eb).map { ($0 * wa + $1 * wb) / w }
+        } else if b.embedding == nil { speakers[k].embedding = a.embedding }
+        speakers[k].talkSeconds += a.talkSeconds
+        if speakers[k].sample == nil { speakers[k].sample = a.sample; speakers[k].sampleAt = a.sampleAt }
+        speakers.remove(at: i)
+    }
+
     public func speaker(_ label: Int?) -> RecordedSpeaker? { label.flatMap { l in speakers.first { $0.label == l } } }
     public var unnamedSpeakers: [RecordedSpeaker] { speakers.filter { $0.personID == nil && $0.talkSeconds >= 3 } }
 
     /// "Dana Fischer", "You", or "Speaker 2".
     public func name(of label: Int?, in dir: Directory) -> String {
         guard let s = speaker(label) else { return "Unknown speaker" }
-        guard let p = dir.person(id: s.personID) else { return "Speaker \(s.label + 1)" }
+        guard let p = dir.person(id: s.personID) else { return s.name ?? "Speaker \(s.label + 1)" }
         return p.isMe ? "You" : p.name
     }
 
@@ -169,6 +222,8 @@ public struct RecordedSpeaker: Codable, Hashable, Sendable {
     /// Who the agent thinks it is from what was said ("Thanks Alex", "as Acme's finance lead…"), for one-tap confirmation.
     public var suggestedPersonID: String?
     public var suggestionWhy: String?
+    /// The name the transcript came with (Teams knows who spoke), when it matched no one in the directory yet.
+    public var name: String?
 
     public enum NamedBy: String, Codable, Sendable { case voice, owner }
 
@@ -299,8 +354,13 @@ public extension Store {
                 save(p)
             }
         }
-        if let personID {
-            for k in r.speakers.indices where k != i && r.speakers[k].personID == personID { r.speakers[k].personID = nil; r.speakers[k].namedBy = nil }
+        // The same person on another voice: speaker separation split one person in two. Merge into that voice.
+        if let personID, let k = r.speakers.firstIndex(where: { $0.label != label && $0.personID == personID }) {
+            r.mergeSpeaker(label, into: r.speakers[k].label)
+            r.processedAt = nil
+            save(r)
+            relabelRecordings(except: r.id)
+            return
         }
         r.speakers[i].personID = personID
         r.speakers[i].namedBy = personID == nil ? nil : .owner
@@ -309,6 +369,19 @@ public extension Store {
         r.processedAt = nil
         save(r)
         relabelRecordings(except: r.id)
+    }
+
+    /// Merges two voices that are one person (speaker separation split them): see `Recording.mergeSpeaker`.
+    func mergeSpeaker(recordingID: String, _ from: Int, into: Int) {
+        guard var r = get(Recording.self, recordingID), from != into else { return }
+        let target = r.speaker(into)?.personID
+        if let e = r.speaker(from)?.embedding, let target, var p = get(Person.self, target) {
+            Voice.learn(e, into: &p, recordingID: r.id, label: from)
+            save(p)
+        }
+        r.mergeSpeaker(from, into: into)
+        r.processedAt = nil
+        save(r)
     }
 
     /// Forgets one voice sample (or all of them) of a person.
