@@ -215,16 +215,17 @@ struct QuestionsView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        let open = model.openClarifications, answered = model.recentlyAnswered
         List {
-            Panel(id: "questions.open", title: "To validate", count: model.openClarifications.count) {
-                if model.openClarifications.isEmpty {
+            Panel(id: "questions.open", title: "To validate", count: open.count) {
+                if open.isEmpty {
                     Text("Nothing to check. Jinnie asks here when sources disagree or it isn't sure who someone is.").foregroundStyle(.secondary)
                 }
-                ForEach(model.openClarifications) { ClarificationRow(clarification: $0) }
+                ForEach(open) { ClarificationRow(clarification: $0) }
             }
-            if !model.recentlyAnswered.isEmpty {
-                Panel(id: "questions.answered", title: "Answered", count: model.recentlyAnswered.count) {
-                    ForEach(model.recentlyAnswered) { ClarificationRow(clarification: $0) }
+            if !answered.isEmpty {
+                Panel(id: "questions.answered", title: "Answered", count: answered.count) {
+                    ForEach(answered) { ClarificationRow(clarification: $0) }
                 }
             }
         }

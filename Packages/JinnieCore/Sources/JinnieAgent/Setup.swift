@@ -58,7 +58,7 @@ public enum Setup {
             c.detail = "Not installed"
             c.steps = [.init("Install Claude Code (needs a Claude Pro, Max, Team or Enterprise plan):", command: "curl -fsSL https://claude.ai/install.sh | bash",
                              url: "https://code.claude.com/docs/en/setup"),
-                       .init("Then sign in:", command: "claude auth login")]
+                       .init("Then sign in:", command: Claude.usesOwnAccount ? "\(SetupCheck.jinniectl) claude-login" : "claude auth login")]
             return c
         }
         let out = run(exe, ["auth", "status", "--json"])
@@ -71,7 +71,7 @@ public enum Setup {
         }
         guard json["loggedIn"] as? Bool == true else {
             c.detail = "Installed, not signed in"
-            c.steps = [.init("Sign in with your Claude account:", command: "claude auth login")]
+            c.steps = [.init("Sign in with your Claude account:", command: Claude.usesOwnAccount ? "\(SetupCheck.jinniectl) claude-login" : "claude auth login")]
             return c
         }
         let method = json["authMethod"] as? String ?? ""
@@ -83,14 +83,15 @@ public enum Setup {
             // Connectors belong to a claude.ai account: signed in as someone else, Jinnie sees none of yours.
             c.status = .warning
             c.detail = "Signed in as \(email)\(org.map { " (\($0))" } ?? ""), not as you. Your claude.ai connectors (Gmail, Slack, Calendar, Drive) belong to your own account, so Jinnie can't use them."
-            c.steps = [.init("Sign in with your own Claude account:", command: "claude auth login")]
+            c.steps = [.init("Sign in with your own Claude account:", command: Claude.usesOwnAccount ? "\(SetupCheck.jinniectl) claude-login" : "claude auth login")]
         } else if method == "claude.ai" {
             c.status = .ok
             c.detail = "Signed in\(email.map { " as \($0)" } ?? "")\(plan.map { " · \($0.capitalized) plan" } ?? "")"
+                + (Claude.usesOwnAccount ? " · Jinnie's own account (Claude Code in Terminal can use another)" : "")
         } else {
             c.status = .warning
             c.detail = "Signed in with \(method): runs may be billed per use, and claude.ai connectors (Gmail, Slack…) are only available with a Claude account"
-            c.steps = [.init("Sign in with your Claude subscription instead:", command: "claude auth login")]
+            c.steps = [.init("Sign in with your Claude subscription instead:", command: Claude.usesOwnAccount ? "\(SetupCheck.jinniectl) claude-login" : "claude auth login")]
         }
         return c
     }
@@ -201,10 +202,7 @@ public enum Setup {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
-        env.removeValue(forKey: "ANTHROPIC_API_KEY")
-        p.environment = env
+        p.environment = Claude.environment()
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice

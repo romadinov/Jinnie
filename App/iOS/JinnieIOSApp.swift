@@ -76,6 +76,13 @@ struct IOSRoot: View {
             ImprovementNoteView(pending: p) { ImprovementNoteRequest.shared.pending = nil }
         }
         .onOpenURL { url in openedRoute = Route(url: url) }
+        // `-route jinnie://project/<id>` (launch argument) opens a page on launch, without the system's "Open in?" prompt;
+        // for previews and demo recordings.
+        .task {
+            guard let s = UserDefaults.standard.string(forKey: "route"), let url = URL(string: s) else { return }
+            try? await Task.sleep(for: .seconds(UserDefaults.standard.double(forKey: "routeDelay")))
+            openedRoute = Route(url: url)
+        }
         .sheet(item: $openedRoute) { route in
             NavigationStack {
                 RouteView(route: route).jinnieDestinations()
@@ -120,14 +127,16 @@ struct ProjectsAndCustomers: View {
         Group {
             if customers { CustomersView() } else { ProjectsView() }
         }
-        .safeAreaInset(edge: .top) {
-            Picker("Show", selection: $customers) {
-                Text("Projects").tag(false)
-                Text("Customers").tag(true)
+        // In the navigation bar: as an inset over the content it sat on the large title, which then showed blurred.
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Picker("Show", selection: $customers) {
+                    Text("Projects").tag(false)
+                    Text("Customers").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16).padding(.bottom, 6)
-            .background(.bar)
         }
     }
 }

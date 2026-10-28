@@ -344,6 +344,23 @@ final class AppModel {
 
     func deleteRecording(_ r: Recording) { store.delete(r) }
 
+    /// A new name sticks (Jinnie only renames "Recording …" titles). A different meeting, or none, makes Jinnie read the
+    /// recording again; its learned item is renamed too.
+    func editRecording(_ r: Recording, title: String, meetingItemID: String?) {
+        guard var fresh = store.get(Recording.self, r.id) else { return }
+        let meetingChanged = fresh.meetingItemID != meetingItemID
+        fresh.title = title
+        fresh.meetingItemID = meetingItemID
+        fresh.noMeeting = meetingItemID == nil ? true : nil
+        if meetingChanged { fresh.processedAt = nil }
+        store.save(fresh)
+        if let id = fresh.itemID, var item = store.get(Item.self, id), item.title != title {
+            item.title = title
+            store.save(item)
+        }
+        if meetingChanged { AgentHooks.shared?.runNow() }
+    }
+
     // MARK: Transcript corrections
 
     func correctLine(_ r: Recording, _ turn: Recording.Turn, to text: String) {

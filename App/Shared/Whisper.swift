@@ -14,12 +14,44 @@ final class WhisperModel {
     private(set) var kit: WhisperKit?
     private var preparing: Task<WhisperKit?, Never>?
 
+    /// The model meetings are transcribed with, chosen in Settings (Mac): turbo is fast; the full large-v3 is somewhat more
+    /// accurate on languages other than English (e.g. Russian) and 2–3× slower. Downloaded once when first used.
+    enum Choice: String, CaseIterable, Identifiable {
+        case turbo, full, gigaam
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .turbo: "Whisper large-v3 turbo (fast)"
+            case .full: "Whisper large-v3 (more accurate, slower)"
+            case .gigaam: "Russian: GigaAM, English: Whisper turbo"
+            }
+        }
+        var variant: String { self == .full ? "openai_whisper-large-v3-v20240930" : "openai_whisper-large-v3-v20240930_turbo_632MB" }
+    }
+    static var choice: Choice {
+        get {
+            let c = UserDefaults.standard.string(forKey: "transcriptionModel").flatMap(Choice.init) ?? .turbo
+            #if os(macOS)
+            return c
+            #else
+            return c == .gigaam ? .turbo : c  // GigaAM runs on the Mac
+            #endif
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "transcriptionModel") }
+    }
+
     static var variant: String {
         #if os(macOS)
-        "openai_whisper-large-v3-v20240930_turbo_632MB"
+        choice.variant
         #else
         WhisperKit.recommendedModels().default
         #endif
+    }
+
+    /// After the model choice changes: the next transcription loads (and if needed downloads) the new one.
+    func reset() {
+        kit = nil
+        status = Self.existingFolder == nil ? .notDownloaded : .loading
     }
 
     static var downloadBase: URL {
@@ -99,15 +131,42 @@ final class WhisperModel {
     /// A long recording with word timings (for aligning with speakers). Language is detected per 30 s window.
     func transcribeLong(_ samples: [Float], progress: @escaping @Sendable (Double) -> Void) async throws -> [TranscriptionResult] {
         guard let kit = await prepare() else { throw WhisperError.notReady }
+        // A clip of one window or less is decoded whole: splitting it at pauses (VAD) lost a 27 s passage in testing.
+        if samples.count <= 16000 * 28 {
+            let o = DecodingOptions(detectLanguage: true, skipSpecialTokens: true, wordTimestamps: true)
+            return try await kit.transcribe(audioArray: samples, decodeOptions: o)
+        }
         // No vocabulary prompt: with one, WhisperKit's word timings collapsed and whole sentences were dropped (tested
         // with whisperkit-cli --prompt). Names are corrected later from the directory when the agent reads the transcript.
         let options = DecodingOptions(detectLanguage: true, skipSpecialTokens: true, wordTimestamps: true, chunkingStrategy: .vad)
         let total = Double(samples.count) / 16000
         // Progress is approximate: windows of ~30 s, decoded roughly in order.
-        return try await kit.transcribe(audioArray: samples, decodeOptions: options, callback: { p in
+        var results = try await kit.transcribe(audioArray: samples, decodeOptions: options, callback: { p in
             progress(min(0.99, Double(p.windowId + 1) * 30 / max(total, 30)))
             return nil
         })
+        // Recovery: on a long recording Whisper sometimes skips a whole window it judged silent (tested on a 1-hour
+        // Russian meeting: 39 s of speech missing in one place, 8% of the text overall). Gaps of 8 s or more that hold
+        // at least 3 s of speech are transcribed again on their own and added back.
+        let spans = results.flatMap(\.segments).filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
+            .map { (start: Double($0.start), end: Double($0.end)) }
+        for gap in Recording.gaps(spans, duration: total) {
+            let lo = max(0, Int(gap.start * 16000)), hi = min(samples.count, Int(gap.end * 16000))
+            guard hi > lo, Recording.speechSeconds(samples[lo..<hi]) >= 3 else { continue }
+            var o = options
+            o.chunkingStrategy = hi - lo > 16000 * 28 ? .vad : nil
+            guard let more = try? await kit.transcribe(audioArray: Array(samples[lo..<hi]), decodeOptions: o) else { continue }
+            for r in more {
+                let shifted = r.segments.map { seg -> TranscriptionSegment in
+                    var s = seg
+                    s.start += Float(gap.start); s.end += Float(gap.start)
+                    s.words = s.words?.map { w in var w = w; w.start += Float(gap.start); w.end += Float(gap.start); return w }
+                    return s
+                }
+                results.append(TranscriptionResult(text: r.text, segments: shifted, language: r.language, timings: r.timings))
+            }
+        }
+        return results
     }
 
     enum WhisperError: LocalizedError {

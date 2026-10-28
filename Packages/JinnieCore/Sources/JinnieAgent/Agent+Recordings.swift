@@ -249,9 +249,11 @@ extension Agent {
         return text
     }
 
-    /// The calendar meeting a recording most likely was: one that overlaps its start (±15 min).
+    /// The calendar meeting a recording most likely was: one that started from 15 minutes before the recording (you joined
+    /// late) to 10 minutes after it (you were early). Not one that merely starts during it: a 10:00 meeting 30 minutes into
+    /// a 9:30 call is a different meeting (it took a Teams call's title and attendees once).
     public static func meeting(for start: Date, duration: Double, items: [Item]) -> Item? {
-        let window = start.addingTimeInterval(-15 * 60)...start.addingTimeInterval(max(duration, 600))
+        let window = start.addingTimeInterval(-15 * 60)...start.addingTimeInterval(min(max(duration, 60), 600))
         return items.filter { ($0.source == .calendar || $0.sourceRef.hasPrefix("outlook-cal:")) && window.contains($0.occurredAt) }
             .min { abs($0.occurredAt.timeIntervalSince(start)) < abs($1.occurredAt.timeIntervalSince(start)) }
     }

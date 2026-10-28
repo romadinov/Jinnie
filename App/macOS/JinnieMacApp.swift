@@ -355,6 +355,9 @@ struct MacSettings: View {
                     }
                 }
             }
+            Section("Claude account") {
+                ClaudeAccountSettings()
+            }
             Section("Command line") {
                 LabeledContent("jinniectl") {
                     Button(cliInstalled ? "Reinstall…" : "Install…") { CommandLineTool.install(); cliInstalled = CommandLineTool.isInstalled }
@@ -462,6 +465,11 @@ struct MeetingSettings: View {
         .onChange(of: mode) { _, m in detector.mode = m }
         Toggle("Only when my calendar shows a meeting", isOn: $calendarOnly)
             .onChange(of: calendarOnly) { _, v in detector.calendarOnly = v }
+        Picker("Transcription model", selection: Binding(get: { WhisperModel.choice }, set: { WhisperModel.choice = $0; WhisperModel.shared.reset() })) {
+            ForEach(WhisperModel.Choice.allCases) { Text($0.label).tag($0) }
+        }
+        Text("Runs on this Mac. The full Whisper model is a little more accurate and takes 2–3 times longer (about 1.5 GB). GigaAM reads Russian much better (it gets the words and punctuation right where Whisper guesses) and keeps Whisper for English; it downloads about 225 MB the first time it's used.")
+            .font(.caption).foregroundStyle(.secondary)
         TextField("Never record meetings whose title contains", text: $skip)
             .onSubmit { detector.skipWords = skip }
             .onChange(of: skip) { _, v in detector.skipWords = v }
@@ -486,6 +494,115 @@ struct ContactsFillButton: View {
                 }
             }
             if let note { Text(note).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+}
+
+/// Signs Jinnie in to its own Claude account from the app: `claude auth login` runs in the background with a separate
+/// config folder; the browser opens and hands the result back to it on this Mac, so it usually finishes by itself. If
+/// Claude's page shows a code instead, it can be pasted here. The new login replaces Jinnie's only once it works.
+@MainActor @Observable
+final class ClaudeSignIn {
+    static let shared = ClaudeSignIn()
+    enum State: Equatable { case idle, waiting, done(String), failed(String) }
+    private(set) var state: State = .idle
+    private var process: Process?
+    private var input: Pipe?
+
+    func start() {
+        cancel()
+        try? FileManager.default.createDirectory(at: Claude.accountDirectory, withIntermediateDirectories: true)
+        guard let exe = Claude.locate() else { state = .failed("Claude Code is not installed"); return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = ["auth", "login"] + (OwnerProfile.current.emails.first.map { ["--email", $0] } ?? [])
+        var env = Claude.environment()
+        env["CLAUDE_CONFIG_DIR"] = Claude.accountDirectory.path  // signs in in place: the login is tied to this path
+        p.environment = env
+        let pipe = Pipe()
+        p.standardInput = pipe
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        p.terminationHandler = { _ in
+            Task { @MainActor in ClaudeSignIn.shared.finished() }
+        }
+        do { try p.run(); process = p; input = pipe; state = .waiting } catch { state = .failed(error.localizedDescription) }
+    }
+
+    /// The fallback: a code Claude's page shows when it can't hand the sign-in back by itself.
+    func submit(code: String) {
+        guard let input else { return }
+        input.fileHandleForWriting.write(Data((code.trimmingCharacters(in: .whitespacesAndNewlines) + "\n").utf8))
+    }
+
+    func cancel() {
+        if let process, process.isRunning { process.terminationHandler = nil; process.terminate() }
+        process = nil; input = nil
+        if state == .waiting { state = .idle }
+    }
+
+    private func finished() {
+        process = nil; input = nil
+        Task.detached {
+            let email = Claude.activateOwnAccount()
+            await MainActor.run {
+                ClaudeSignIn.shared.state = email.map { .done($0) } ?? .failed("Not signed in; Jinnie still uses Claude Code's account.")
+            }
+        }
+    }
+}
+
+/// Which Claude account Jinnie runs on: the one Claude Code uses in Terminal, or its own (claude.ai connectors belong to
+/// the account, so Jinnie's must be the one with your Gmail, Slack, Calendar and Drive).
+struct ClaudeAccountSettings: View {
+    @State private var signIn = ClaudeSignIn.shared
+    @State private var own = Claude.usesOwnAccount
+    @State private var account: String?
+    @State private var code = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LabeledContent("Jinnie runs as") {
+                Text(account.map { own ? "\($0) (its own account)" : "\($0) (same as Claude Code)" } ?? (own ? "its own account" : "the same account as Claude Code"))
+            }
+            switch signIn.state {
+            case .waiting:
+                Label("Your browser opened: sign in there. Jinnie finishes by itself.", systemImage: "hourglass").foregroundStyle(.secondary)
+                HStack {
+                    TextField("If the page shows a code, paste it here", text: $code)
+                    Button("Finish") { signIn.submit(code: code); code = "" }.disabled(code.isEmpty)
+                    Button("Cancel") { signIn.cancel() }
+                }
+            case .done(let email):
+                Label("Signed in as \(email). Claude Code in Terminal can now use another account.", systemImage: "checkmark.circle").foregroundStyle(.green)
+            case .failed(let why):
+                Label(why, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            case .idle:
+                EmptyView()
+            }
+            HStack {
+                if signIn.state != .waiting {
+                    Button(own ? "Sign In Again…" : "Sign In to Its Own Account…") { signIn.start() }
+                }
+                if own && signIn.state != .waiting {
+                    Button("Use Claude Code's Account") {
+                        Claude.useSharedAccount()
+                        refresh()
+                    }
+                }
+            }
+            Text("Claude connectors (Gmail, Slack, Calendar, Drive) belong to the account, so Jinnie's must be the one that has yours.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .onAppear { refresh() }
+        .onChange(of: signIn.state) { _, _ in refresh() }
+    }
+
+    private func refresh() {
+        own = Claude.usesOwnAccount
+        Task.detached {
+            let s = Claude.accountStatus(configDirectory: Claude.usesOwnAccount ? Claude.accountDirectory : nil)
+            await MainActor.run { account = s.email }
         }
     }
 }

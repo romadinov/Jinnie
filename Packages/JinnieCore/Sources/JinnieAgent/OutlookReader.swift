@@ -119,8 +119,49 @@ public struct OutlookReader: Sendable {
                 if seen.insert(text).inserted { out.append(text) }
             }
         }
+        // Outlook shows times in the mailbox's time zone (a client's, e.g. New Zealand), not this Mac's. The calendar labels
+        // itself "current time: Wed 1:39 PM"; the difference from now is the shift to undo, so every event reads in local time.
+        let shift = (try? browser(["eval", "document.querySelector('[aria-label^=\"calendar view, current time\"]')?.getAttribute('aria-label')||''"])).flatMap { OutlookReader.calendarShift($0) } ?? 0
+        if shift != 0 { out = out.map { OutlookReader.shifted($0, by: -shift) } }
         try? open("https://outlook.office.com/mail/")
         return out
+    }
+
+    /// Seconds Outlook's displayed clock is ahead of this Mac ("…current time: Wed 1:39 PM" at 11:39 here → +7200),
+    /// rounded to 15 minutes; nil if the label can't be read.
+    static func calendarShift(_ label: String, now: Date = Date()) -> TimeInterval? {
+        guard let r = label.range(of: #"(\d{1,2}):(\d{2}) ?([AP]M)"#, options: .regularExpression) else { return nil }
+        let parts = label[r].replacingOccurrences(of: " ", with: "")
+        let digits = parts.dropLast(2).split(separator: ":").compactMap { Int($0) }
+        guard digits.count == 2 else { return nil }
+        var h = digits[0] % 12
+        if parts.hasSuffix("PM") { h += 12 }
+        let shown = h * 60 + digits[1]
+        let c = Calendar.current.dateComponents([.hour, .minute], from: now)
+        var diff = shown - ((c.hour ?? 0) * 60 + (c.minute ?? 0))
+        if diff > 12 * 60 { diff -= 24 * 60 }
+        if diff < -12 * 60 { diff += 24 * 60 }
+        let rounded = Int((Double(diff) / 15).rounded()) * 15
+        return TimeInterval(rounded * 60)
+    }
+
+    /// An event line with its "h:mm AM to h:mm PM, Weekday, Month d, yyyy" moved by `seconds` (day and date follow).
+    static func shifted(_ line: String, by seconds: TimeInterval) -> String {
+        let pattern = #"(\d{1,2}:\d{2} [AP]M) to (\d{1,2}:\d{2} [AP]M), (Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), ([A-Z][a-z]+ \d{1,2}, \d{4})"#
+        guard let re = try? NSRegularExpression(pattern: pattern),
+              let m = re.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              let r1 = Range(m.range(at: 1), in: line), let r2 = Range(m.range(at: 2), in: line), let r4 = Range(m.range(at: 4), in: line) else { return line }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMMM d, yyyy h:mm a"
+        let day = String(line[r4])
+        guard let start = f.date(from: "\(day) \(line[r1])"), var end = f.date(from: "\(day) \(line[r2])") else { return line }
+        if end < start { end = end.addingTimeInterval(86400) }
+        let s = start.addingTimeInterval(seconds), e = end.addingTimeInterval(seconds)
+        let time = DateFormatter(); time.locale = f.locale; time.dateFormat = "h:mm a"
+        let date = DateFormatter(); date.locale = f.locale; date.dateFormat = "EEEE, MMMM d, yyyy"
+        let whole = Range(m.range, in: line)!
+        return line.replacingCharacters(in: whole, with: "\(time.string(from: s)) to \(time.string(from: e)), \(date.string(from: s))")
     }
 
     static func quoted(_ line: String) -> String? {

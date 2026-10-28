@@ -491,7 +491,11 @@ struct ActionRow: View {
                 HStack(spacing: 8) {
                     if showProject, let p = model.project(action.projectID) { ProjectChip(name: p.name) }
                     if action.kind == .next, let who = model.personName(action) { Text(who).font(.caption).foregroundStyle(.secondary) }
-                    if let due = action.due { Label(due, systemImage: "calendar").font(.caption).foregroundStyle(isOverdue ? .red : .secondary) }
+                    if let due = action.due {
+                        HStack(spacing: 3) { Image(systemName: "calendar"); Text(NewsRow.day(due)) }
+                            .font(.caption).lineLimit(1).fixedSize()
+                            .foregroundStyle(isOverdue ? .red : .secondary)
+                    }
                     if action.uberdoerID != nil {
                         Image(systemName: "checklist").font(.caption).foregroundStyle(.secondary).help("In Uberdoer")
                     } else if let e = action.syncError {
@@ -685,16 +689,20 @@ struct ClarificationRow: View {
                 }
             }
             Group {
-                HStack(spacing: 6) {
-                    if showProject, let p = model.project(c.projectID) { ProjectChip(name: p.name) }
-                    if let why = c.why { Text(why).font(.callout).foregroundStyle(.secondary) }
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if showProject, let p = model.project(c.projectID) { ProjectChip(name: p.name).fixedSize() }
+                    if let why = c.why {
+                        Text(why).font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 if c.status == .open {
                     if let options = c.options, !options.isEmpty {
                         FlowButtons(options: options) { model.answer(c, $0) }
                     }
                     HStack(spacing: 6) {
-                        TextField("Your answer…", text: $text, axis: .vertical)
+                        TextField("Your answer…", text: $text, axis: Self.fieldAxis)
                             .lineLimit(1...4)
                             .textFieldStyle(.roundedBorder)
                             .focused($focused)
@@ -704,7 +712,7 @@ struct ClarificationRow: View {
                     }
                 } else if changing {
                     HStack(spacing: 6) {
-                        TextField("Correct answer…", text: $text, axis: .vertical)
+                        TextField("Correct answer…", text: $text, axis: Self.fieldAxis)
                             .lineLimit(1...4)
                             .textFieldStyle(.roundedBorder)
                             .focused($focused)
@@ -738,6 +746,13 @@ struct ClarificationRow: View {
         .padding(.vertical, 2)
     }
 
+    /// On the Mac a growing field inside a List changes the row's height without the table noticing, so rows overlap.
+    #if os(macOS)
+    static let fieldAxis = Axis.horizontal
+    #else
+    static let fieldAxis = Axis.vertical
+    #endif
+
     func send() {
         model.answer(clarification, text)
         text = ""
@@ -770,21 +785,61 @@ struct ClarificationRow: View {
     }
 }
 
-/// Suggested answers as small buttons that wrap onto several lines.
+/// Suggested answers as small buttons that wrap onto several lines. A wrapping layout rather than ViewThatFits, which
+/// measures every alternative on each pass and, inside a Mac List, made the Questions page lag and rows overlap.
 struct FlowButtons: View {
     let options: [String]
     let action: (String) -> Void
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 6) { buttons }
-            VStack(alignment: .leading, spacing: 6) { buttons }
+        FlowLayout(spacing: 6) {
+            ForEach(options, id: \.self) { o in
+                Button(o) { action(o) }.buttonStyle(.bordered).controlSize(.small)
+            }
+        }
+    }
+}
+
+/// Lays subviews out left to right, starting a new line when the next one doesn't fit.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = rows(width: proposal.width ?? .infinity, subviews: subviews)
+        let width = rows.map { $0.width }.max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(rows.count - 1, 0))
+        return CGSize(width: proposal.width.map { min($0, width) } ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for i in row.indices {
+                let size = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
         }
     }
 
-    @ViewBuilder var buttons: some View {
-        ForEach(options, id: \.self) { o in
-            Button(o) { action(o) }.buttonStyle(.bordered).controlSize(.small)
+    private struct Row { var indices: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func rows(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = [], row = Row()
+        for (i, view) in subviews.enumerated() {
+            let size = view.sizeThatFits(.unspecified)
+            let needed = row.indices.isEmpty ? size.width : row.width + spacing + size.width
+            if !row.indices.isEmpty, needed > width {
+                rows.append(row)
+                row = Row()
+            }
+            row.width = row.indices.isEmpty ? size.width : row.width + spacing + size.width
+            row.height = max(row.height, size.height)
+            row.indices.append(i)
         }
+        if !row.indices.isEmpty { rows.append(row) }
+        return rows
     }
 }

@@ -18,6 +18,7 @@ jinnie — personal knowledge agent
   jinnie remarkable-peek        list reMarkable notebooks and which ones are due for transcription
   jinnie remarkable [--since YYYY-MM-DD] [--limit N] [--only <name>]   transcribe notebooks (backfill / one notebook)
   jinnie outlook-peek           show what Jinnie can read from Outlook right now
+  jinnie claude-login [--same]  sign Jinnie in to its own Claude account (--same: share Claude Code's again)
   jinnie teams-recordings [--days N] [--only "<title>"] [--list] [--capture "<title>" <out.m4a>]
                                 read Teams transcripts of meetings shared with you (skips ones Jinnie recorded)
   jinnie uberdoer               sync actions with Uberdoer
@@ -116,6 +117,32 @@ case "customers":
     let noCustomer = dir.projects.filter { $0.customerID == nil && $0.status != .done }.map(\.name)
     if !noCustomer.isEmpty { print("No customer: " + noCustomer.joined(separator: ", ")) }
     exit(0)
+case "claude-login":
+    // Jinnie's own Claude login (`--same` goes back to sharing Claude Code's): the browser opens to sign in.
+    if rest.contains("--same") {
+        Claude.useSharedAccount()
+        print("Jinnie now uses the same Claude account as Claude Code.")
+        exit(0)
+    }
+    try FileManager.default.createDirectory(at: Claude.accountDirectory, withIntermediateDirectories: true)
+    guard let exe = Claude.locate() else { print("Claude Code is not installed"); exit(1) }
+    var login = ["auth", "login"]
+    if let e = OwnerProfile.current.emails.first { login += ["--email", e] }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: exe)
+    p.arguments = login
+    var env = Claude.environment()
+    env["CLAUDE_CONFIG_DIR"] = Claude.accountDirectory.path
+    p.environment = env
+    try p.run()
+    p.waitUntilExit()
+    // Only a confirmed sign-in switches Jinnie; otherwise nothing changes.
+    guard let email = Claude.activateOwnAccount() else { print("Not signed in; nothing changed."); exit(1) }
+    print("Jinnie now runs as \(email). Claude Code in Terminal keeps its own account.")
+    exit(0)
+case "demo-seed":
+    do { print(try DemoSeed.run(store: store)) } catch { print("Failed: \(error)"); exit(1) }
+    done()
 case "teams-recordings":
     do {
         let days = args.firstIndex(of: "--days").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil }

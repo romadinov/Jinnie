@@ -176,3 +176,61 @@ Things that cost time building Jinnie, and what to do instead.
   with `&`, `#`, quotes and Cyrillic.
 - Contacts fill blanks only (emails, organisation, job title), matched by email, then by a unique exact full name. Never
   overwrite. "Add to Contacts" is the only write, and only on request.
+
+## Russian meetings: what was tested (Oct 2026, a 1-hour Russian call with English terms)
+- On the same 10-minute excerpt: Whisper large-v3 turbo with language detection (Jinnie's setup) was the most faithful.
+  Forcing `language: "ru"` (turbo or full large-v3) left empty stretches, and large-v3 invented sentences. Parakeet v3
+  (FluidAudio) was 5x faster but garbled fast or overlapping speech and English terms ("ременью Cloud"). Don't switch
+  engines or force the language without re-running this comparison.
+- The real loss was Whisper skipping windows of a long recording it judged silent: 39 s of speech in one place, 8% of
+  the text overall. `transcribeLong` now re-transcribes gaps of 8 s or more that contain at least 3 s of speech.
+- SpeakerKit's `addSpeakerInfo` skips segments without word timings. Those were empty in the test, but watch for it.
+- Speaker separation can turn scattered "угу / okay / Thank you" into an extra voice: `absorbMinorSpeakers` folds in
+  voices under 15 s of speech. Whisper can loop on one word ("клоджик-клоджик-…"): collapsed in `withoutHallucinations`.
+
+## Outlook on the web shows the mailbox's time zone, not the Mac's
+- A client tenant's mailbox can be set to its own zone (e.g. New Zealand, 2 h ahead of Sydney). Event labels read
+  "11:30 AM … Wednesday, October 28" in that zone; Jinnie stored them as local time, so meetings looked 2 h late and a
+  recording was matched to the wrong meeting. `Intl` in the page gives the browser's zone (useless here).
+- The calendar's main region is labelled "calendar view, current time: Wed 1:39 PM": its difference from now is the
+  shift. `OutlookReader.events()` converts every event line to local time before the model sees it.
+- Mail list times are in that zone too (not converted yet).
+- Checking a day view isn't enough to say "not on the calendar": it scrolls to now and hides earlier events from the
+  accessibility tree. Read the week view.
+
+## Call audio saved at half its real rate (27–28 Oct 2026): check track lengths first
+- Every call track (`<id>-meeting.m4a`) from 27 Oct on was exactly half as long as its microphone track: the tap's
+  declared format didn't match what arrived, so the call side played twice as fast and drifted from the microphone
+  (13 min apart by the end of a 27-min call). Mixed with the mic, that gave hallucinations, phantom or wrong speakers,
+  "sped-up" voice samples, and much of what looked like poor Russian transcription. The cause wasn't found (no code
+  change in the path); `TapWriter` now measures the real arrival rate over the first 3 s and uses it.
+- Repair: `ffmpeg -i X-meeting.m4a -af asetrate=8000,aresample=16000` restores length and sync (verified: the two
+  sides then form a conversation). Originals kept in `recordings/half-rate-originals/`.
+- Before judging transcription quality, compare the two tracks' durations. The Russian engine bake-off and the gap
+  recovery tuning above were done on such a distorted recording: re-check them on a healthy one.
+- Write repaired audio with Apple's encoder: `ffmpeg … -c:a pcm_s16le x.wav && afconvert -f m4af -d aac -b 32000 x.wav
+  x.m4a`. AAC m4a files written by ffmpeg could not be read by AVAudioFile/WhisperKit ("Failed to read audio file"), and
+  the recorder used to treat an unreadable call file as "no call audio": that silently transcribed calls from the
+  microphone only and, through the "nobody else spoke" rule, deleted two recordings (restored from Time Machine).
+  An unreadable call file is now an error. Always load-test a rewritten audio file before swapping it in.
+
+## Russian engine comparison, redone on clean audio (28 Oct 2026)
+- The first comparison above ran on a meeting whose call track was at half rate: ignore its conclusions. On the repaired
+  meetings (24 s excerpts, both sides, two meetings): Whisper large-v3 turbo and full large-v3 were nearly identical and
+  good; full large-v3 slightly better on a few words and punctuation (2–3× slower). Parakeet v3 was fastest but made more
+  errors on conversational Russian ("по ЮА" for "по UI"). Turbo stays the default; full large-v3 is a Settings choice.
+
+## GigaAM for Russian (sherpa-onnx)
+- On the owner's Russian meetings GigaAM v3 got the words Whisper guessed ("Как вчера прошло?", "надо поговорить",
+  "я делала") and wrote proper punctuation and ё, at about 1 s per 24 s on the CPU; it mangles English words
+  ("проджект-менеджерам", "Contract Velve"). So Whisper transcribes first and `GigaAM.refine` re-reads only mostly
+  Cyrillic stretches (one speaker, up to 20 s), each speaker from their own track on a call.
+- Packaging: official sherpa-onnx static macOS arm64 "no-tts" libraries + `c-api.h` (pinned SHA-256), linked through a
+  bridging header; model `sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16` (MIT, ~225 MB int8)
+  downloaded in the app on first use. Python/PyTorch (what the GigaAM repo ships) is not shippable.
+- The sherpa C types are opaque in Swift (`OpaquePointer`); config strings must stay alive until the recognizer exists.
+
+- **Mac List rows: no ViewThatFits, no growing text fields.** In a macOS `List` (an NSTableView underneath), `ViewThatFits`
+  measures each alternative on every pass, and a `TextField(axis: .vertical)` changes the row's height without the table
+  noticing. Together they made the Questions page lag and draw rows over each other. Use a `Layout` (`FlowLayout`) for
+  wrapping buttons, single-line fields on the Mac, and long secondary text with `.fixedSize(horizontal: false, vertical: true)`.

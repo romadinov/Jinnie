@@ -412,3 +412,80 @@ func tempStore() throws -> Store {
     #expect(r.segments.map(\.speaker) == [0, 0, 2])
     #expect(r.turns.count == 2)  // the split person's lines now read as one turn
 }
+
+@Test func strayShortRepliesAreNotAVoice() {
+    var r = Recording(title: "Call")
+    var a = RecordedSpeaker(label: 0); a.talkSeconds = 600
+    var b = RecordedSpeaker(label: 1); b.talkSeconds = 300
+    var stray = RecordedSpeaker(label: 2); stray.talkSeconds = 3
+    r.speakers = [a, b, stray]
+    r.segments = [RecordedSegment(speaker: 2, start: 0, end: 1, text: "Окей."),
+                  RecordedSegment(speaker: 0, start: 1, end: 60, text: "Let's start."),
+                  RecordedSegment(speaker: 2, start: 60, end: 61, text: "Угу."),
+                  RecordedSegment(speaker: 1, start: 61, end: 90, text: "Sure.")]
+    #expect(r.absorbMinorSpeakers() == 1)
+    #expect(r.speakers.map(\.label) == [0, 1])
+    #expect(r.segments.map(\.speaker) == [0, 0, 0, 1])  // first goes to the next speaker, second to the previous one
+}
+
+@Test func loopingWordsCollapse() {
+    #expect(Recording.withoutHallucinations("доступ к клоджик-клоджик-клоджик-клоджик-клоджик") == "доступ к клоджик")
+    #expect(Recording.withoutHallucinations("no no no") == "no no no")  // three in a row is still speech
+}
+
+@Test func gapsInTheTranscriptAreFound() {
+    let spans: [(start: Double, end: Double)] = [(0, 10), (12, 20), (30, 40), (39, 50)]
+    let g = Recording.gaps(spans, duration: 70)
+    #expect(g.count == 2)
+    #expect(g[0].start == 20 && g[0].end == 30)
+    #expect(g[1].start == 50 && g[1].end == 70)
+    #expect(Recording.speechSeconds(ArraySlice(Array(repeating: Float(0), count: 16000))) == 0)
+    #expect(Recording.speechSeconds(ArraySlice((0..<16000).map { Float(sin(Double($0) / 5)) * 0.3 })) > 0.9)
+}
+
+@Test func aStrangerNeedsACloseVoiceMatch() {
+    var dana = Person(name: "Dana Fischer")
+    dana.voiceSamples = [VoiceSample(embedding: [1, 0, 0])]
+    let unknownVoice: [Float] = [0.72, 0.69, 0]  // cosine ~0.72 to Dana: someone else with no voiceprint yet
+    #expect(Voice.bestMatch(unknownVoice, people: [dana], candidates: ["me"]) == nil)
+    #expect(Voice.bestMatch(unknownVoice, people: [dana], candidates: [dana.id])?.personID == dana.id)
+    #expect(Voice.bestMatch([0.95, 0.3, 0], people: [dana], candidates: ["me"])?.personID == dana.id)  // ~0.95: clearly Dana
+}
+
+@Test func aMeetingStartingMidwayIsNotTheRecording() {
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    var later = Item(source: .calendar, sourceRef: "c1", title: "Another meeting", occurredAt: start.addingTimeInterval(29 * 60))
+    later.id = "later"
+    var onTime = Item(source: .calendar, sourceRef: "c2", title: "This one", occurredAt: start.addingTimeInterval(-3 * 60))
+    onTime.id = "ontime"
+    #expect(Agent.meeting(for: start, duration: 3500, items: [later]) == nil)
+    #expect(Agent.meeting(for: start, duration: 3500, items: [later, onTime])?.id == "ontime")
+}
+
+@Test func aRecoveredLineThatRepeatsIsSkipped() {
+    let lines = [RecordedSegment(speaker: 1, start: 1270, end: 1272, text: "Иногда команда спешит, у нас был Борис, он на складе работал, и он устал")]
+    #expect(Recording.repeats("Он на складе работал, и он устал, что 20% времени", at: 1272, in: lines))
+    #expect(!Recording.repeats("Совсем другая мысль про инвойсы и проекты", at: 1272, in: lines))
+    #expect(!Recording.repeats("Иногда команда спешит, он на складе работал", at: 1300, in: lines))  // far apart: may be said again
+}
+
+@Test func outlookTimesInAnotherTimeZoneAreConverted() {
+    // Outlook said "current time: Wed 1:39 PM" while the Mac's clock read 11:39: it shows times 2 hours ahead.
+    var c = DateComponents(); c.year = 2026; c.month = 10; c.day = 28; c.hour = 11; c.minute = 39
+    let now = Calendar.current.date(from: c)!
+    #expect(OutlookReader.calendarShift("calendar view, current time: Wed 1:39 PM", now: now) == 7200)
+    #expect(OutlookReader.calendarShift("calendar view, current time: Wed 11:40 AM", now: now) == 0)
+    let line = "Data Migration - Sync call, 11:30 AM to 12:30 PM, Wednesday, October 28, 2026, By Shreyash Salot, Tentative"
+    #expect(OutlookReader.shifted(line, by: -7200) == "Data Migration - Sync call, 9:30 AM to 10:30 AM, Wednesday, October 28, 2026, By Shreyash Salot, Tentative")
+    // Across midnight the day and date move too.
+    #expect(OutlookReader.shifted("Standup, 1:00 AM to 1:30 AM, Thursday, October 29, 2026", by: -7200) == "Standup, 11:00 PM to 11:30 PM, Wednesday, October 28, 2026")
+}
+
+@Test func whisperNoiseIsRemoved() {
+    #expect(Recording.withoutHallucinations("Thank you. Thank you. Thank you. Thank you.") == "Thank you.")
+    #expect(Recording.withoutHallucinations("ご視聴ありがとうございました") == "")
+    #expect(Recording.foreignScript("ご視聴ありがとうございました", languages: "English and Russian"))
+    #expect(!Recording.foreignScript("Давай мы его засунем в портфолио", languages: "English and Russian"))
+    #expect(!Recording.foreignScript("Revenue Cloud, okay", languages: "English"))
+    #expect(Recording.foreignScript("Давай мы его засунем", languages: "English"))
+}

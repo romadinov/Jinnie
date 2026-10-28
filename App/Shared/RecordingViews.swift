@@ -82,6 +82,7 @@ struct RecordingDetail: View {
     @Environment(AppModel.self) private var model
     let recordingID: String
     @State private var showLocal = false
+    @State private var editing = false
 
     var body: some View {
         if let r = model.recording(recordingID) {
@@ -92,7 +93,9 @@ struct RecordingDetail: View {
                         Text("\(r.startedAt.formatted(date: .complete, time: .shortened)) · \(Recording.clock(r.duration))")
                             .font(.callout).foregroundStyle(.secondary)
                         if let m = model.item(r.meetingItemID) {
-                            NavigationLink(value: Route.item(m.id)) { Label(m.title, systemImage: "calendar").font(.callout) }
+                            // The linked calendar meeting (not the recording's name; change or remove it in Edit).
+                            NavigationLink(value: Route.item(m.id)) { Label("Calendar meeting: \(m.title)", systemImage: "calendar").font(.callout) }
+                                .help("The calendar meeting Jinnie linked this recording to. Wrong? Edit → Meeting → None.")
                         }
                         if let mood = r.mood {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -117,6 +120,13 @@ struct RecordingDetail: View {
                             Button("Try again") { MeetingRecorder.shared.reprocess(r) }
                             #endif
                         }
+                        #if os(macOS)
+                        if r.status == .ready, !r.isExternal, SnippetPlayer.shared.canPlay(r) {
+                            Button { MeetingRecorder.shared.reprocess(r) } label: { Label("Transcribe Again", systemImage: "arrow.clockwise") }
+                                .buttonStyle(.borderless).font(.callout)
+                                .help("Transcribe the audio again with the latest improvements; names you gave voices are kept")
+                        }
+                        #endif
                     }
                 }
                 if r.status == .ready && !r.segments.isEmpty {
@@ -148,9 +158,65 @@ struct RecordingDetail: View {
                 }
             }
             .navigationTitle("Recording")
+            .toolbar { Button("Edit") { editing = true } }
+            .sheet(isPresented: $editing) { RecordingEditor(recording: r) }
         } else {
             Text("Recording not found").foregroundStyle(.secondary)
         }
+    }
+}
+
+/// The recording's name and the meeting it was (or none); delete. A new meeting makes Jinnie read it again with that
+/// meeting's attendees and project.
+struct RecordingEditor: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let recording: Recording
+    @State private var title = ""
+    @State private var meetingID: String?
+    @State private var confirmDelete = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Name", text: $title)
+                Picker("Meeting", selection: $meetingID) {
+                    Text("None (not a calendar meeting)").tag(String?.none)
+                    ForEach(nearbyMeetings) { m in
+                        Text("\(m.title) · \(m.occurredAt.formatted(date: .omitted, time: .shortened))").tag(Optional(m.id))
+                    }
+                }
+                Text("Meetings within 3 hours of \(recording.startedAt.formatted(date: .abbreviated, time: .shortened)). Changing it makes Jinnie read the recording again with that meeting's people and project.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Section {
+                    Button("Delete Recording", role: .destructive) { confirmDelete = true }
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Edit Recording")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { save(); dismiss() }
+                        .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .confirmationDialog("Delete \(recording.title)? The transcript and what Jinnie learned from it stay in its timeline.", isPresented: $confirmDelete) {
+                Button("Delete", role: .destructive) { model.deleteRecording(recording); dismiss() }
+            }
+            .onAppear { title = recording.title; meetingID = recording.meetingItemID }
+        }
+        .frame(minWidth: 460, minHeight: 320)
+    }
+
+    private var nearbyMeetings: [Item] {
+        let window = recording.startedAt.addingTimeInterval(-3 * 3600)...recording.startedAt.addingTimeInterval(3 * 3600)
+        return model.items.filter { ($0.source == .calendar || $0.sourceRef.hasPrefix("outlook-cal:")) && window.contains($0.occurredAt) }
+            .sorted { abs($0.occurredAt.timeIntervalSince(recording.startedAt)) < abs($1.occurredAt.timeIntervalSince(recording.startedAt)) }
+    }
+
+    private func save() {
+        model.editRecording(recording, title: title.trimmingCharacters(in: .whitespaces), meetingItemID: meetingID)
     }
 }
 

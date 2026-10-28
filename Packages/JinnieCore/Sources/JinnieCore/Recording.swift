@@ -23,6 +23,8 @@ public struct Recording: Entity {
     public var segments: [RecordedSegment] = []
     /// The calendar meeting it most likely was (item id), for the title and likely speakers.
     public var meetingItemID: String?
+    /// The owner said it wasn't a calendar meeting (e.g. a Slack huddle): never link one by time again.
+    public var noMeeting: Bool?
     /// Set once the agent has extracted knowledge from the transcript; cleared when speakers are renamed.
     public var processedAt: Date?
     public var itemID: String?
@@ -79,6 +81,25 @@ public struct Recording: Entity {
     public func sampleTimes(for label: Int, max: Int = 5) -> [Double] {
         let mine = segments.filter { $0.speaker == label && $0.end - $0.start >= 2 }.sorted { $0.end - $0.start > $1.end - $1.start }
         return Array(mine.prefix(max).map(\.start))
+    }
+
+    /// Speaker separation sometimes makes a "voice" out of scattered short replies ("Угу", "okay", "Thank you").
+    /// With other speakers present, a voice under `minSeconds` of speech is folded in: each of its lines goes to whoever
+    /// spoke just before it (or just after, at the start). Returns how many voices were folded in.
+    @discardableResult
+    public mutating func absorbMinorSpeakers(minSeconds: Double = 15) -> Int {
+        let minor = speakers.filter { $0.talkSeconds < minSeconds && $0.personID == nil }.map(\.label)
+        guard !minor.isEmpty, speakers.count - minor.count >= 1 else { return 0 }
+        let order = segments.indices.sorted { segments[$0].start < segments[$1].start }
+        for (n, i) in order.enumerated() where segments[i].speaker.map(minor.contains) == true {
+            let before = order[..<n].reversed().first { segments[$0].speaker.map { !minor.contains($0) } == true }
+            let after = order[(n + 1)...].first { segments[$0].speaker.map { !minor.contains($0) } == true }
+            guard let to = (before ?? after).flatMap({ segments[$0].speaker }) else { continue }
+            segments[i].speaker = to
+            if let k = speakers.firstIndex(where: { $0.label == to }) { speakers[k].talkSeconds += segments[i].end - segments[i].start }
+        }
+        speakers.removeAll { minor.contains($0.label) }
+        return minor.count
     }
 
     /// One person split into two voices: `from`'s lines become `into`'s, talk time adds up, `from` goes.
@@ -147,16 +168,74 @@ public struct Recording: Entity {
         for i in turn.indices.dropFirst().sorted(by: >) where segments.indices.contains(i) { segments.remove(at: i) }
     }
 
+    /// Seconds of 30 ms frames loud enough to be someone talking (above about -40 dBFS) in 16 kHz audio.
+    /// A join chime or a notification sound stays well under the few seconds that count as speech.
+    public static func speechSeconds(_ samples: ArraySlice<Float>) -> Double {
+        let frame = 480
+        var loud = 0
+        var i = samples.startIndex
+        while i + frame <= samples.endIndex {
+            var sum: Float = 0
+            for j in i..<(i + frame) { sum += samples[j] * samples[j] }
+            if (sum / Float(frame)).squareRoot() > 0.01 { loud += 1 }
+            i += frame
+        }
+        return Double(loud) * 0.03
+    }
+
+    /// Whether a line is written in a script none of the owner's languages use (Whisper "hears" Japanese or Korean
+    /// subtitles in noise): with English and Russian, anything mostly outside Latin and Cyrillic.
+    public static func foreignScript(_ text: String, languages: String) -> Bool {
+        let letters = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }
+        guard letters.count >= 3 else { return false }
+        let l = languages.lowercased()
+        let cyrillicOK = l.contains("russian") || l.contains("ukrain") || l.contains("русск")
+        let usual = letters.filter { s in
+            (s.value < 0x250) || (cyrillicOK && (0x400...0x52F).contains(s.value))
+        }
+        return Double(usual.count) / Double(letters.count) < 0.5
+    }
+
+    /// Whether `text` mostly repeats a line already within a few seconds of `start` (recovery passes can catch the same
+    /// sentence twice, in slightly different words).
+    public static func repeats(_ text: String, at start: Double, in segments: [RecordedSegment]) -> Bool {
+        func words(_ s: String) -> Set<String> {
+            Set(s.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count > 2 })
+        }
+        let mine = words(text)
+        guard mine.count >= 3 else { return false }
+        return segments.contains { s in
+            abs(s.start - start) < 8 && Double(words(s.text).intersection(mine).count) / Double(mine.count) >= 0.6
+        }
+    }
+
+    /// Stretches of at least `minimum` seconds that no transcribed span covers (Whisper sometimes skips a window it
+    /// judges silent, e.g. a quiet speaker or a language switch).
+    public static func gaps(_ spans: [(start: Double, end: Double)], duration: Double, minimum: Double = 8) -> [(start: Double, end: Double)] {
+        var out: [(start: Double, end: Double)] = []
+        var covered = 0.0
+        for s in spans.sorted(by: { $0.start < $1.start }) {
+            if s.start - covered >= minimum { out.append((covered, s.start)) }
+            covered = max(covered, s.end)
+        }
+        if duration - covered >= minimum { out.append((covered, duration)) }
+        return out
+    }
+
     /// Stock phrases Whisper "hears" in silence or music, learned from subtitled training data.
     public static let hallucinations = [
         "Продолжение следует", "Субтитры сделал DimaTorzok", "Субтитры создавал DimaTorzok", "Редактор субтитров",
         "Корректор А.Егорова", "Субтитры", "Спасибо за просмотр", "Thank you for watching", "Thanks for watching",
-        "Please subscribe", "[BLANK_AUDIO]", "(music)", "[Music]", "♪",
+        "Please subscribe", "[BLANK_AUDIO]", "*Играет музыка*", "Играет музыка",
+        "ご視聴ありがとうございました", "ご視聴ありがとうございます", "字幕は", "Sous-titres", "Untertitel der Amara.org-Community", "(music)", "[Music]", "♪",
     ]
 
-    /// A segment's text without those phrases; empty if nothing real is left.
+    /// A segment's text without those phrases; empty if nothing real is left. A word Whisper got stuck repeating
+    /// ("клоджик-клоджик-клоджик-…") is kept once.
     public static func withoutHallucinations(_ s: String) -> String {
-        var t = s
+        var t = s.replacingOccurrences(of: #"(?i)\b(\w+)\b(?:[\s,\-–]+\1\b){3,}"#, with: "$1", options: .regularExpression)
+        // A whole sentence said over and over ("Thank you. Thank you. Thank you.") is Whisper looping: keep it once.
+        t = t.replacingOccurrences(of: #"(?i)([^.!?]{2,60}[.!?])(?:\s*\1){2,}"#, with: "$1", options: .regularExpression)
         for j in hallucinations where t.localizedCaseInsensitiveContains(j) { t = t.replacingOccurrences(of: j, with: "", options: .caseInsensitive) }
         let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
         let meaningful = trimmed.trimmingCharacters(in: .punctuationCharacters.union(.whitespaces).subtracting(CharacterSet(charactersIn: "?!")))
@@ -286,6 +365,8 @@ public enum Voice {
     /// Same-speaker threshold for pyannote/wespeaker centroids from separate recordings. Deliberately strict: a wrong
     /// name is worse than asking.
     public static let threshold: Float = 0.62
+    /// For people not expected in the meeting (not an attendee, a known participant or on its project).
+    public static let strangerThreshold: Float = 0.80
 
     /// The person whose voiceprints best match `embedding`, if confidently above the threshold and clearly ahead of the
     /// runner-up. `candidates` (e.g. meeting attendees) get a small bonus.
@@ -298,6 +379,9 @@ public enum Voice {
         }
         scored.sort { $0.1 > $1.1 }
         guard let top = scored.first, top.1 >= threshold else { return nil }
+        // Someone nobody expected in this meeting needs a much closer match: on call audio an unknown voice (with no
+        // voiceprint yet) can sit at ~0.7 from a known one, and once gave a client colleague another person's name.
+        if !candidates.isEmpty, !candidates.contains(top.0), top.1 < strangerThreshold { return nil }
         if scored.count > 1, top.1 - scored[1].1 < 0.05 { return nil }  // two people sound alike: ask instead
         return (top.0, min(1, top.1))
     }

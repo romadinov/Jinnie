@@ -5,3 +5,6 @@ Packages/JinnieCore/.build/
 *.xcuserstate
 .DS_Store
 build-sim/
+
+# sherpa-onnx static libraries, fetched by scripts/fetch-sherpa.sh
+Vendor/

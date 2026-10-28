@@ -61,6 +61,55 @@ public struct Claude: Sendable {
         self.workDirectory = workDirectory ?? JinnieConfig.supportDirectory().appendingPathComponent("agent")
     }
 
+    /// Jinnie's own Claude login, separate from the one Claude Code uses in Terminal (Claude Code keeps a login per
+    /// CLAUDE_CONFIG_DIR, in a Keychain entry keyed by the folder's path, so the folder must never move).
+    public static var accountDirectory: URL { JinnieConfig.supportDirectory().appendingPathComponent("claude-account", isDirectory: true) }
+    /// Written only after a sign-in in `accountDirectory` is confirmed: until then Jinnie keeps using Claude Code's login.
+    static var activeMarker: URL { accountDirectory.appendingPathComponent(".jinnie-active") }
+    public static var usesOwnAccount: Bool { FileManager.default.fileExists(atPath: activeMarker.path) }
+
+    /// `claude auth status` for a config folder (nil: Claude Code's default): signed in, and as whom.
+    public static func accountStatus(configDirectory: URL?) -> (loggedIn: Bool, email: String?) {
+        guard let exe = locate() else { return (false, nil) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = ["auth", "status", "--json"]
+        var env = environment()
+        if let configDirectory { env["CLAUDE_CONFIG_DIR"] = configDirectory.path } else { env.removeValue(forKey: "CLAUDE_CONFIG_DIR") }
+        p.environment = env
+        let out = Pipe()
+        p.standardOutput = out; p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return (false, nil) }
+        p.waitUntilExit()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        guard let start = data.firstIndex(of: UInt8(ascii: "{")),
+              let json = (try? JSONSerialization.jsonObject(with: data[start...])) as? [String: Any] else { return (false, nil) }
+        return (json["loggedIn"] as? Bool == true, json["email"] as? String)
+    }
+
+    /// After a sign-in in `accountDirectory`: switches Jinnie to it if it worked. Returns the email, or nil.
+    @discardableResult
+    public static func activateOwnAccount() -> String? {
+        let s = accountStatus(configDirectory: accountDirectory)
+        guard s.loggedIn else { return nil }
+        FileManager.default.createFile(atPath: activeMarker.path, contents: Data())
+        return s.email ?? "your account"
+    }
+
+    /// Back to Claude Code's login; Jinnie's own stays signed in for later.
+    public static func useSharedAccount() { try? FileManager.default.removeItem(at: activeMarker) }
+
+    /// The environment every `claude` process gets: the usual PATH, never an API key, and Jinnie's own login if set up.
+    public static func environment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        env["PATH"] = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", env["PATH"] ?? ""].joined(separator: ":")
+        env.removeValue(forKey: "ANTHROPIC_API_KEY")  // always the subscription, never API billing
+        env.removeValue(forKey: "CLAUDECODE")
+        if usesOwnAccount { env["CLAUDE_CONFIG_DIR"] = accountDirectory.path } else { env.removeValue(forKey: "CLAUDE_CONFIG_DIR") }
+        return env
+    }
+
     /// GUI apps don't get the shell PATH, so look in the usual install locations.
     public static func locate() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -173,12 +222,7 @@ public struct Claude: Sendable {
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = args
         p.currentDirectoryURL = cwd
-        var env = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        env["PATH"] = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", env["PATH"] ?? ""].joined(separator: ":")
-        env.removeValue(forKey: "ANTHROPIC_API_KEY")  // always the subscription, never API billing
-        env.removeValue(forKey: "CLAUDECODE")
-        p.environment = env
+        p.environment = Claude.environment()
         let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
 
