@@ -59,7 +59,8 @@ final class AgentController {
             UserDefaults.standard.set(true, forKey: "removedHallucinations1")
         }
         MeetingRecorder.shared.resumeInterrupted()
-        MeetingDetector.shared.start()
+        RecorderLink.onFinished { Task { @MainActor in MeetingRecorder.shared.resumeInterrupted() } }
+        RecorderService.ensure()
 
         if agent.store.meta("bootstrapped") == nil {
             if Uberdoer.isInstalled { _ = try? agent.importUberdoerProjects() }

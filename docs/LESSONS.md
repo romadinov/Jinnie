@@ -234,3 +234,21 @@ Things that cost time building Jinnie, and what to do instead.
   measures each alternative on every pass, and a `TextField(axis: .vertical)` changes the row's height without the table
   noticing. Together they made the Questions page lag and draw rows over each other. Use a `Layout` (`FlowLayout`) for
   wrapping buttons, single-line fields on the Mac, and long secondary text with `.fixedSize(horizontal: false, vertical: true)`.
+
+- **Project refreshes are the expensive call** (summary + stakeholder brief re-read the whole project: about $0.75–1.35
+  each). Answers and role changes once requested an immediate refresh each, and the "daily while active" rule refreshed
+  projects with nothing new, so one afternoon cost ~$16 in refreshes against $0.33 for reading email. Now: only when
+  something is new, at most once a day per project, one per run, an hour apart; answers set `Project.changedAt`.
+- **Never create an `ISO8601DateFormatter` per date.** Decoding the store did, and Uberdoer sync rebuilt the `Directory`
+  (every person and project) per action: a core busy for minutes and the UI lagging. Formatters are made once.
+
+- **Native engines run in a helper process.** With sherpa-onnx (C++) linked into the app, Jinnie crashed minutes after a
+  GigaAM run with a corrupted Swift runtime object (`MainActor.assumeIsolated` in a timer, `objc_opt_class` at 0x1e):
+  heap corruption shows up far from its cause. Address Sanitizer found nothing in our Swift side, and it can't see inside
+  prebuilt libraries. `jinnie-gigaam` now does the decoding; if it crashes, the recording keeps Whisper's text.
+
+- **Recording lives in its own process.** Jinnie Recorder records calls whether or not Jinnie runs; launchd restarts it
+  after a crash (`KeepAlive.SuccessfulExit = false`, so "Quit Recorder" stays quit). Checked: `kill -9` → back within
+  seconds; quitting Jinnie leaves it recording. A `.recording` row whose audio hasn't grown for 5 minutes is treated as
+  orphaned; the recorder also hands over its own orphans when it starts. Permissions (TCC) are per app, so the recorder
+  asks for Microphone, System Audio Recording, Contacts and Accessibility itself.

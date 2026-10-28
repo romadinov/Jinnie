@@ -155,7 +155,7 @@ extension Agent {
     /// opening anything, then the marker Jinnie uses to find the task again.
     func note(for a: Action, person: Person?) -> String {
         let item = a.itemID.flatMap { store.get(Item.self, $0) }
-        let project = Directory(store: store).project(id: a.projectID)
+        let project = a.projectID.flatMap { store.get(Project.self, $0) }
         var lines: [String] = []
         if let url = item?.link { lines.append(url.absoluteString) }
         lines.append(a.jinnieURL)

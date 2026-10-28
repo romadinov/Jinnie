@@ -147,8 +147,9 @@ extension Agent {
             c.result = (o["result"] as? String)?.nilIfEmpty ?? fact
             c.error = nil
             store.save(c)
-            // Stakeholders and summary should show the answer now, not at the next daily refresh.
-            if let pid = c.projectID, var p = store.get(Project.self, pid) { p.summaryRequestedAt = Date(); store.save(p) }
+            // The summary picks the answer up at the next daily refresh; rewriting it per answer cost a project refresh
+            // for every few answers.
+            if let pid = c.projectID, var p = store.get(Project.self, pid) { p.changedAt = Date(); store.save(p) }
             log("Applied answer: \(c.result ?? "")")
         } catch {
             c = store.get(Clarification.self, c.id) ?? c

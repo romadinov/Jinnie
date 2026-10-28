@@ -275,28 +275,20 @@ final class SetupWindow {
     }
 }
 
-/// WhatsApp and Telegram calls: work calls are recorded, private ones aren't. Needs Contacts (who is a work contact) and
-/// Accessibility (the caller's name in the call window).
+/// WhatsApp and Telegram calls: work calls are recorded, private ones aren't. Jinnie Recorder (which records calls) needs
+/// Contacts (who is a work contact) and Accessibility (the caller's name in the call window); it asks on the first such call.
 struct MessengerSetupRow: View {
-    @State private var contacts = CallerID.contactsAllowed
-    @State private var ax = CallerID.accessibilityAllowed
-
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Image(systemName: contacts && ax ? "checkmark.circle.fill" : "circle.dashed").foregroundStyle(contacts && ax ? .green : .secondary)
+                Image(systemName: "phone.circle").foregroundStyle(.secondary)
                 Text("WhatsApp and Telegram calls").font(.body.weight(.semibold))
             }
-            Text("Calls with work contacts are recorded like meetings; private calls are not. Jinnie reads the caller's name in the call window and looks it up in your Contacts and its people.")
+            Text("Calls with work contacts are recorded like meetings; private calls are not. Jinnie Recorder reads the caller's name in the call window and looks it up in your Contacts and Jinnie's people. On the first such call macOS asks to allow Jinnie Recorder in Contacts and Accessibility.")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {
-                if contacts { Text("Contacts allowed").font(.caption).foregroundStyle(.secondary) }
-                else { Button("Allow Contacts") { Task { contacts = await CallerID.requestContacts() } }.controlSize(.small) }
-                if ax { Text("Accessibility allowed").font(.caption).foregroundStyle(.secondary) }
-                else {
-                    Button("Allow Accessibility") { CallerID.requestAccessibility() }.controlSize(.small)
-                    Button("Check") { ax = CallerID.accessibilityAllowed }.controlSize(.small)
-                }
+                Button("Open Accessibility Settings") { Opener.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }.controlSize(.small)
+                Button("Open Contacts Settings") { Opener.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Contacts") }.controlSize(.small)
             }
         }
         .padding(.vertical, 2)

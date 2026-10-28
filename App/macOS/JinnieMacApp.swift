@@ -35,6 +35,7 @@ struct JinnieMacApp: App {
             CommandGroup(after: .newItem) {
                 Button("Quick Note…") { CaptureController.shared.show() }.keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Sync Now") { agent.runNow(force: true) }.keyboardShortcut("r", modifiers: [.command])
+                PauseReadingButton(agent: agent)
                 Button("Import Recording…") {
                     let panel = NSOpenPanel()
                     panel.allowedContentTypes = [.audio, .movie]
@@ -174,6 +175,26 @@ struct AgentStatusFooter: View {
     }
 }
 
+/// Pause or resume background reading; in the menu bar menu and the main menu (File).
+struct PauseReadingButton: View {
+    let agent: AgentController
+
+    var body: some View {
+        let _ = agent.objectWillChangeHack  // the pause lives in the store; this re-reads it after a change
+        if let until = agent.agent.pausedUntil {
+            Button("Resume Background Reading (paused until \(until.formatted(date: .omitted, time: .shortened)))") {
+                agent.agent.pausedUntil = nil; agent.objectWillChangeHack += 1; agent.runNow(force: false)
+            }
+        } else {
+            Button("Pause Background Reading for Today") {
+                // Until 6:00 tomorrow: saves the plan's limits; notes, open questions and Ask keep working.
+                agent.agent.pausedUntil = Calendar.current.date(bySettingHour: 6, minute: 0, second: 0, of: Date().addingTimeInterval(86400))
+                agent.objectWillChangeHack += 1
+            }
+        }
+    }
+}
+
 struct MenuBarContent: View {
     @Environment(AppModel.self) private var model
     @Environment(AgentController.self) private var agent
@@ -187,17 +208,7 @@ struct MenuBarContent: View {
         Divider()
         Text(agent.isRunning ? agent.current : "Next: \(model.openNext.count) · Waiting: \(model.openWaiting.count)")
         Button("Sync Now") { agent.runNow(force: true) }.disabled(agent.isRunning)
-        if let until = agent.agent.pausedUntil {
-            Button("Resume Background Reading (paused until \(until.formatted(date: .omitted, time: .shortened)))") {
-                agent.agent.pausedUntil = nil; agent.objectWillChangeHack += 1; agent.runNow(force: false)
-            }
-        } else {
-            Button("Pause Background Reading for Today") {
-                // Until 6:00 tomorrow: saves the plan's limits; notes, open questions and Ask keep working.
-                agent.agent.pausedUntil = Calendar.current.date(bySettingHour: 6, minute: 0, second: 0, of: Date().addingTimeInterval(86400))
-                agent.objectWillChangeHack += 1
-            }
-        }
+        PauseReadingButton(agent: agent)
         Divider()
         if ImprovementNoteRequest.isAvailable {
             Button("Suggest an Improvement…") { NSApp.activate(); openWindow(id: "main"); ImprovementNoteRequest.shared.start() }
@@ -220,7 +231,8 @@ enum HotKeys {
         HotKeyCenter.shared.register(id: 1, captureShortcut) { MainActor.assumeIsolated { CaptureController.shared.show() } }
         // Voice note: Quick Note that starts listening at once. Record: start/stop a meeting recording.
         HotKeyCenter.shared.register(id: 2, Shortcut.load(voiceKey, default: .voiceDefault)) { MainActor.assumeIsolated { CaptureController.shared.show(listen: true) } }
-        HotKeyCenter.shared.register(id: 3, Shortcut.load(recordKey, default: .recordDefault)) { MainActor.assumeIsolated { MeetingRecorder.shared.toggle() } }
+        // Record (⌃⌥R) belongs to Jinnie Recorder, which runs even when Jinnie doesn't.
+        RecorderLink.send(.reloadSettings)
     }
 }
 
@@ -453,26 +465,38 @@ struct ShortcutRecorder: NSViewRepresentable {
 }
 
 struct MeetingSettings: View {
-    @State private var detector = MeetingDetector.shared
-    @State private var mode = MeetingDetector.shared.mode
-    @State private var calendarOnly = MeetingDetector.shared.calendarOnly
-    @State private var skip = MeetingDetector.shared.skipWords
+    @State private var mode = RecorderSettings.mode
+    @State private var calendarOnly = RecorderSettings.calendarOnly
+    @State private var skip = RecorderSettings.skipWords
+    @State private var recorderStatus = RecorderService.statusText
 
     var body: some View {
-        Picker("When a call starts (Zoom, Teams, Meet, Webex, Slack, FaceTime)", selection: $mode) {
-            ForEach(MeetingDetector.Mode.allCases) { Text($0.label).tag($0) }
+        LabeledContent("Jinnie Recorder") {
+            HStack {
+                Text(recorderStatus).foregroundStyle(.secondary)
+                if RecorderService.service.status == .requiresApproval {
+                    Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
+                } else if !RecorderService.isRunning {
+                    Button("Start") { RecorderService.ensure(); DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { recorderStatus = RecorderService.statusText } }
+                }
+            }
         }
-        .onChange(of: mode) { _, m in detector.mode = m }
+        Text("Records calls even when Jinnie is closed (it starts at login); Jinnie transcribes them when it runs.")
+            .font(.caption).foregroundStyle(.secondary)
+        Picker("When a call starts (Zoom, Teams, Meet, Webex, Slack, FaceTime)", selection: $mode) {
+            ForEach(RecorderSettings.Mode.allCases) { Text($0.label).tag($0) }
+        }
+        .onChange(of: mode) { _, m in RecorderSettings.mode = m }
         Toggle("Only when my calendar shows a meeting", isOn: $calendarOnly)
-            .onChange(of: calendarOnly) { _, v in detector.calendarOnly = v }
+            .onChange(of: calendarOnly) { _, v in RecorderSettings.calendarOnly = v }
         Picker("Transcription model", selection: Binding(get: { WhisperModel.choice }, set: { WhisperModel.choice = $0; WhisperModel.shared.reset() })) {
             ForEach(WhisperModel.Choice.allCases) { Text($0.label).tag($0) }
         }
         Text("Runs on this Mac. The full Whisper model is a little more accurate and takes 2–3 times longer (about 1.5 GB). GigaAM reads Russian much better (it gets the words and punctuation right where Whisper guesses) and keeps Whisper for English; it downloads about 225 MB the first time it's used.")
             .font(.caption).foregroundStyle(.secondary)
         TextField("Never record meetings whose title contains", text: $skip)
-            .onSubmit { detector.skipWords = skip }
-            .onChange(of: skip) { _, v in detector.skipWords = v }
+            .onSubmit { RecorderSettings.skipWords = skip }
+            .onChange(of: skip) { _, v in RecorderSettings.skipWords = v }
         Text("Recordings include the meeting app's audio, so the other participants are captured clearly (macOS asks once for System Audio Recording). Recording stops 30 s after the call ends. Many places require everyone's consent to be recorded: use “Copy notice for others” to tell them.")
             .font(.caption).foregroundStyle(.secondary)
     }

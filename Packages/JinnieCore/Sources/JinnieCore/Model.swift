@@ -46,6 +46,8 @@ public struct Project: Entity {
     public var summaryAt: Date?
     /// Set from any device to ask the Mac agent for a fresh summary.
     public var summaryRequestedAt: Date?
+    /// Answers or role changes since the summary: the next daily refresh includes them (no summary just for that).
+    public var changedAt: Date?
     /// Who matters on this project and in what role, on each side. Curated by the agent with the summary;
     /// corrected by notes and Ask ("Ravi replaces Lena").
     public var stakeholders: [Stakeholder]?

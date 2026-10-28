@@ -203,12 +203,22 @@ public final class Store: @unchecked Sendable {
 }
 
 public func parseISODate(_ s: String) -> Date? {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = f.date(from: s) { return d }
-    f.formatOptions = [.withInternetDateTime]
-    if let d = f.date(from: s) { return d }
-    f.formatOptions = [.withFullDate]
-    f.timeZone = .current
-    return f.date(from: s)
+    ISODateParsers.fractional.date(from: s) ?? ISODateParsers.plain.date(from: s) ?? ISODateParsers.day.date(from: s)
+}
+
+/// Made once: creating an ISO8601DateFormatter per date made decoding the store (every person, project and run) slow
+/// enough to keep a core busy and the UI lagging. ISO8601DateFormatter is thread-safe.
+private enum ISODateParsers {
+    nonisolated(unsafe) static let fractional = make([.withInternetDateTime, .withFractionalSeconds])
+    nonisolated(unsafe) static let plain = make([.withInternetDateTime])
+    nonisolated(unsafe) static let day: ISO8601DateFormatter = {
+        let f = make([.withFullDate])
+        f.timeZone = .current
+        return f
+    }()
+    static func make(_ options: ISO8601DateFormatter.Options) -> ISO8601DateFormatter {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = options
+        return f
+    }
 }

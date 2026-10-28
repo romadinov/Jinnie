@@ -6,8 +6,14 @@ Spec: README.md. Lessons: docs/LESSONS.md (read it before changing the agent, sy
 - Core: `cd Packages/JinnieCore && swift build && swift test`. The CLI is `.build/debug/jinnie`.
 - Apps: `xcodegen generate`, then `scripts/install-mac.sh` and `scripts/install-iphone.sh` (signed, needs the Apple ID in
   Xcode). Run xcodebuild outside the sandbox. Install the Mac app by `pkill -x Jinnie`, then `ditto` into /Applications.
-- The Mac app links sherpa-onnx (GigaAM Russian transcription) as static libraries in `Vendor/sherpa-onnx`, fetched and
-  checksum-verified by `scripts/fetch-sherpa.sh` (a pre-build phase; not committed). The Mac app is arm64 only.
+- GigaAM (Russian transcription) runs in a helper, `jinnie-gigaam` (App/GigaAMHelper, embedded in Contents/MacOS), which links
+  sherpa-onnx as static libraries in `Vendor/sherpa-onnx`, fetched and checksum-verified by `scripts/fetch-sherpa.sh` (a
+  pre-build phase; not committed). Keep native engines out of the app's process. The Mac app is arm64 only.
+- Calls are recorded by **Jinnie Recorder** (App/Recorder, embedded in Contents/Library/LoginItems), a menu bar app that
+  launchd starts at login and restarts after a crash (LaunchAgent plist in App/RecorderAgent, registered by
+  `RecorderService` via SMAppService). It saves `Recording` rows (`.recording`, then `.processing`); Jinnie transcribes them.
+  The two talk through `RecorderLink` (distributed notifications; settings in Jinnie's defaults). It has its own
+  Microphone, System Audio Recording, Contacts and Accessibility permissions.
 - Compile-only check: `xcodebuild … CODE_SIGNING_ALLOWED=NO` (iOS: `-destination 'generic/platform=iOS Simulator'`).
 - **Never test against the user's real data or Uberdoer.** Use `JINNIE_HOME=<scratchpad>/jh` and
   `TASKER_DB=<scratchpad>/ud-test/tasker.sqlite`. Copying Uberdoer's real database is (rightly) blocked.

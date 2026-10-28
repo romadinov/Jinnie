@@ -11,28 +11,10 @@ import SwiftUI
 final class MeetingDetector {
     static let shared = MeetingDetector()
 
-    enum Mode: String, CaseIterable, Identifiable {
-        case off, ask, automatic
-        var id: String { rawValue }
-        var label: String {
-            switch self { case .off: "Off"; case .ask: "Ask before recording"; case .automatic: "Record automatically" }
-        }
-    }
-
-    var mode: Mode {
-        get { Mode(rawValue: UserDefaults.standard.string(forKey: "meetings.mode") ?? "") ?? .ask }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: "meetings.mode") }
-    }
-    /// Only calls that coincide with a meeting in the calendar (browsers always need one: they use the mic for other things).
-    var calendarOnly: Bool {
-        get { UserDefaults.standard.object(forKey: "meetings.calendarOnly") as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: "meetings.calendarOnly") }
-    }
-    /// Meetings whose title contains any of these words are never recorded.
-    var skipWords: String {
-        get { UserDefaults.standard.string(forKey: "meetings.skip") ?? "private, personal, doctor, interview, HR, 1:1 personal" }
-        set { UserDefaults.standard.set(newValue, forKey: "meetings.skip") }
-    }
+    typealias Mode = RecorderSettings.Mode
+    var mode: Mode { RecorderSettings.mode }
+    var calendarOnly: Bool { RecorderSettings.calendarOnly }
+    var skipWords: String { RecorderSettings.skipWords }
 
     struct App {
         let prefix: String; let name: String; let browser: Bool
@@ -126,7 +108,7 @@ final class MeetingDetector {
     }
 
     func tick(_ procs: [AudioProcess]) {
-        let recorder = MeetingRecorder.shared
+        let recorder = CallRecorder.shared
         guard mode != .off else { return }
         guard let call = activeMeeting(procs) else {
             activeSince = nil
@@ -141,7 +123,7 @@ final class MeetingDetector {
             return
         }
         quietSince = nil
-        guard !handledCurrentCall, !recorder.isRecording, !recorder.isBusy else { return }
+        guard !handledCurrentCall, !recorder.isRecording else { return }
         if call.twoWay { if twoWaySince == nil { twoWaySince = Date() } } else { twoWaySince = nil }
         if call.isMessenger {
             // A voice message also uses the mic: a call is listening and playing for a few seconds.
@@ -201,13 +183,19 @@ final class MeetingDetector {
     }
 
     /// A calendar meeting with other people that is on now (started up to 90 min ago, or starting within 10 min).
+    /// Calendar items are read from Jinnie's database at most once a minute (this runs every second during a call).
     static func calendarMeeting(now: Date = Date()) -> Item? {
-        AppModel.shared.items.filter { i in
-            (i.source == .calendar || i.sourceRef.hasPrefix("outlook-cal:")) && !i.personIDs.isEmpty
-                && i.occurredAt > now.addingTimeInterval(-90 * 60) && i.occurredAt < now.addingTimeInterval(10 * 60)
+        if now.timeIntervalSince(calendarLoaded) > 60 {
+            calendarItems = CallRecorder.shared.store.all(Item.self).filter { $0.source == .calendar || $0.sourceRef.hasPrefix("outlook-cal:") }
+            calendarLoaded = now
+        }
+        return calendarItems.filter { i in
+            !i.personIDs.isEmpty && i.occurredAt > now.addingTimeInterval(-90 * 60) && i.occurredAt < now.addingTimeInterval(10 * 60)
         }
         .min { abs($0.occurredAt.timeIntervalSince(now)) < abs($1.occurredAt.timeIntervalSince(now)) }
     }
+    private static var calendarItems: [Item] = []
+    private static var calendarLoaded = Date.distantPast
 
     /// What to tell the others: recording people without telling them is illegal in many places.
     static let notice = "Heads-up: I'm recording this meeting for my own notes; it's transcribed privately on my Mac. Tell me if you'd rather I didn't."
@@ -289,7 +277,7 @@ struct MeetingPromptView: View {
                     Button("Not this one") { answer(false) }.controlSize(.small)
                     Button("Record") { answer(true) }.buttonStyle(.borderedProminent).controlSize(.small)
                 } else {
-                    Button("Stop") { MeetingRecorder.shared.stop(); answer(false) }.controlSize(.small)
+                    Button("Stop") { CallRecorder.shared.stop(); answer(false) }.controlSize(.small)
                     Button("OK") { answer(false) }.buttonStyle(.borderedProminent).controlSize(.small)
                 }
             }

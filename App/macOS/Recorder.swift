@@ -8,142 +8,70 @@ import SpeakerKit
 import SwiftUI
 import WhisperKit
 
-/// Records a meeting from the microphone, then on this Mac: Whisper transcribes it (word timings), SpeakerKit separates
-/// the speakers and fingerprints each voice, and known voices are named. The agent then reads the transcript.
-/// Audio is kept in Application Support/Jinnie/recordings (16 kHz AAC, ~15 MB/hour) so a crash or quit loses nothing.
+/// Transcribes meeting recordings on this Mac: Whisper transcribes (word timings), SpeakerKit separates the speakers and
+/// fingerprints each voice, and known voices are named. The agent then reads the transcript.
+/// Recording itself is done by Jinnie Recorder (App/Recorder), a separate app that runs even when Jinnie doesn't; this
+/// side sends it Record/Stop and transcribes what it hands over (status `.processing`), one recording at a time.
 @MainActor @Observable
 final class MeetingRecorder {
     static let shared = MeetingRecorder()
 
-    enum State: Equatable { case idle, recording(Date), processing(String, Double), failed(String) }
+    enum State: Equatable { case idle, processing(String, Double), failed(String) }
     private(set) var state: State = .idle
-    var isRecording: Bool { if case .recording = state { return true }; return false }
-    var isBusy: Bool { state != .idle && !(state.isFailure) }
-
-    fileprivate let engine = AVAudioEngine()
-    private var configObserver: NSObjectProtocol?
-    private var file: AVAudioFile?
-    private var systemTap: SystemAudioTap?
-    private var current: Recording?
+    var isBusy: Bool { if case .processing = state { return true }; return false }
+    /// The recording Jinnie Recorder is making on this Mac right now, if any (from the database).
+    var live: Recording? {
+        AppModel.shared.recordings.first { $0.status == .recording && $0.device == AppModel.shared.deviceName && !Self.stale($0) }
+    }
+    var isRecording: Bool { live != nil }
     private var speakerKit: SpeakerKit?
+    private var queue: [String] = []
+    private var draining = false
 
     static var folder: URL { JinnieConfig.supportDirectory().appendingPathComponent("recordings", isDirectory: true) }
     static func audioURL(_ id: String) -> URL { folder.appendingPathComponent("\(id).m4a") }
     /// The meeting app's audio (the other participants), recorded alongside the microphone.
     static func systemURL(_ id: String) -> URL { folder.appendingPathComponent("\(id)-meeting.m4a") }
 
-    // MARK: Recording
+    // MARK: Recording (done by Jinnie Recorder)
 
-    func toggle() { isRecording ? stop() : start(meeting: MeetingDetector.shared.activeMeeting()) }
+    func toggle() { RecorderLink.send(.toggle) }
+    func start() { RecorderLink.send(.start) }
+    func stop() { RecorderLink.send(.stop) }
 
-    /// Starts recording the microphone, plus the audio of `meeting`'s app (the other participants) when there is one.
-    func start(meeting: MeetingDetector.Detected? = nil, auto: Bool = false) {
-        guard state == .idle || state.isFailure else { return }
-        Task {
-            guard await AVCaptureDevice.requestAccess(for: .audio) else {
-                state = .failed("Microphone access is off for Jinnie. Allow it in System Settings → Privacy & Security → Microphone.")
-                return
-            }
-            do { try begin(meeting: meeting, auto: auto) } catch { state = .failed("Couldn't start recording: \(error.localizedDescription)"); teardown() }
-        }
+    /// A `.recording` row whose audio hasn't grown for 5 minutes: the recorder died and wasn't restarted.
+    static func stale(_ r: Recording) -> Bool {
+        let modified = (try? FileManager.default.attributesOfItem(atPath: audioURL(r.id).path))?[.modificationDate] as? Date
+        return Date().timeIntervalSince(modified ?? r.startedAt) > 300
     }
 
-    private func begin(meeting: MeetingDetector.Detected?, auto: Bool) throws {
-        try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
-        let started = Date()
-        var rec = Recording(title: "Recording \(started.formatted(date: .abbreviated, time: .shortened))")
-        rec.startedAt = started
-        rec.device = AppModel.shared.deviceName
-        // Record from the microphone the call uses (e.g. AirPods), not just the Mac's default input.
-        if let device = meeting?.inputDevice, let unit = engine.inputNode.audioUnit {
-            var dev = device
-            AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
-        }
-        let settings: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16000, AVNumberOfChannelsKey: 1,
-                                       AVEncoderBitRateKey: 32000]
-        file = try AVAudioFile(forWriting: Self.audioURL(rec.id), settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
-        try installMicTap()
-        engine.prepare()
-        try engine.start()
-        // AirPods connecting or switching to call mode reconfigures the engine (and stops it): pick up the new input format
-        // and carry on writing to the same file.
-        configObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { _ in
-            MainActor.assumeIsolated {
-                let r = MeetingRecorder.shared
-                guard r.isRecording else { return }
-                do { try r.installMicTap(); r.engine.prepare(); try r.engine.start() }
-                catch { NSLog("Jinnie: microphone lost after a device change: %@", error.localizedDescription) }
-            }
-        }
-        if let meeting {
-            rec.app = meeting.appName
-            rec.autoStarted = auto ? true : nil
-            if let item = meeting.calendarItem { rec.meetingItemID = item.id; rec.title = item.title }
-            if !meeting.participants.isEmpty {
-                rec.participantIDs = meeting.participants.map(\.id)
-                rec.title = "\(meeting.appName) call with \(meeting.participants.map(\.name).joined(separator: ", "))"
-            } else if let label = meeting.callerLabel { rec.title = "\(meeting.appName) call with \(label)" }
-            // The other participants: the meeting app's own audio. If the user hasn't allowed system audio recording,
-            // the microphone recording still goes on.
-            let tap = SystemAudioTap()
-            do { try tap.start(processes: meeting.processIDs, writingTo: Self.systemURL(rec.id)); systemTap = tap }
-            catch { NSLog("Jinnie: meeting audio not recorded: %@", error.localizedDescription) }
-        }
-        rec = AppModel.shared.store.save(rec)
-        current = rec
-        state = .recording(started)
-    }
-
-    /// Converts whatever the input delivers (48 kHz built-in mic, 16/24 kHz AirPods in call mode) to 16 kHz mono.
-    fileprivate func installMicTap() throws {
-        guard let out = file else { return }
-        let input = engine.inputNode
-        let inFormat = input.outputFormat(forBus: 0)
-        guard inFormat.sampleRate > 0,
-              let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false),
-              let converter = AVAudioConverter(from: inFormat, to: mono) else { throw RecorderError.format }
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { buffer, _ in
-            let cap = AVAudioFrameCount(Double(buffer.frameLength) * 16000 / inFormat.sampleRate + 32)
-            guard let pcm = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: cap) else { return }
-            var fed = false
-            converter.convert(to: pcm, error: nil) { _, status in
-                if fed { status.pointee = .noDataNow; return nil }
-                fed = true; status.pointee = .haveData; return buffer
-            }
-            try? out.write(from: pcm)
-        }
-    }
-
-    func stop() {
-        guard case .recording(let started) = state, var rec = current else { return }
-        teardown()
-        rec.duration = Date().timeIntervalSince(started)
-        rec.status = .processing
-        rec = AppModel.shared.store.save(rec)
-        current = nil
-        Task { await process(rec) }
-    }
-
-    private func teardown() {
-        if let configObserver { NotificationCenter.default.removeObserver(configObserver); self.configObserver = nil }
-        systemTap?.stop()
-        systemTap = nil
-        if engine.isRunning { engine.stop() }
-        engine.inputNode.removeTap(onBus: 0)
-        file = nil  // closes the file
-    }
-
-    /// Recordings left unfinished by a quit or crash: process what was saved.
+    /// Transcribes what the recorder finished (also left over from a quit or crash), oldest first.
     func resumeInterrupted() {
         let store = AppModel.shared.store
-        for var r in store.all(Recording.self) where (r.status == .recording || r.status == .processing) && r.id != current?.id {
-            guard FileManager.default.fileExists(atPath: Self.audioURL(r.id).path), r.device == AppModel.shared.deviceName else { continue }
-            if let f = try? AVAudioFile(forReading: Self.audioURL(r.id)) { r.duration = Double(f.length) / f.fileFormat.sampleRate }
-            r.status = .processing
-            r = store.save(r)
-            let rec = r
-            Task { await process(rec) }
+        for var r in store.all(Recording.self).sorted(by: { $0.startedAt < $1.startedAt })
+        where r.status == .processing || (r.status == .recording && Self.stale(r)) {
+            guard FileManager.default.fileExists(atPath: Self.audioURL(r.id).path), r.device == AppModel.shared.deviceName,
+                  !queue.contains(r.id) else { continue }
+            if r.status == .recording {
+                if let f = try? AVAudioFile(forReading: Self.audioURL(r.id)) { r.duration = Double(f.length) / f.fileFormat.sampleRate }
+                r.status = .processing
+                store.save(r)
+            }
+            queue.append(r.id)
+        }
+        drain()
+    }
+
+    private func drain() {
+        guard !draining else { return }
+        draining = true
+        Task {
+            while !queue.isEmpty {
+                let id = queue[0]
+                if let r = AppModel.shared.store.get(Recording.self, id), r.status == .processing { await process(r) }
+                queue.removeFirst()
+            }
+            draining = false
         }
     }
 
@@ -164,7 +92,9 @@ final class MeetingRecorder {
                 let dest = Self.audioURL(rec.id)
                 try await Task.detached { try Self.write(samples, to: dest) }.value
                 rec = AppModel.shared.store.save(rec)
-                await process(rec)
+                state = .idle
+                queue.append(rec.id)
+                drain()
             } catch {
                 state = .failed("Couldn't import \(url.lastPathComponent): \(error.localizedDescription)")
             }
@@ -187,7 +117,13 @@ final class MeetingRecorder {
     }
 
     /// Re-runs transcription and speaker separation (e.g. after an error).
-    func reprocess(_ rec: Recording) { Task { await process(rec) } }
+    func reprocess(_ rec: Recording) {
+        var r = rec
+        r.status = .processing
+        AppModel.shared.store.save(r)
+        if !queue.contains(r.id) { queue.append(r.id) }
+        drain()
+    }
 
     // MARK: Processing
 
@@ -254,10 +190,10 @@ final class MeetingRecorder {
             if WhisperModel.choice == .gigaam {
                 state = .processing("Reading Russian with GigaAM", 0)
                 do {
-                    let giga = try await GigaAM.shared.prepare()
+                    try await GigaAM.shared.prepare()
                     let owner = callOwner, micTrack = mic, callTrack = system, mixed = samples, segs = rec.segments
-                    rec.segments = await Task.detached {
-                        GigaAM.refine(segs, with: giga) { s in isCall ? (s.speaker == owner ? micTrack : callTrack) : mixed }
+                    rec.segments = try await Task.detached {
+                        try GigaAM.refine(segs) { s in isCall ? (s.speaker == owner ? micTrack : callTrack) : mixed }
                     }.value
                 } catch {
                     NSLog("Jinnie: GigaAM unavailable, keeping Whisper's text: %@", error.localizedDescription)
@@ -494,21 +430,24 @@ struct RecordControl: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { ctx in
             HStack(spacing: 10) {
-                switch recorder.state {
-                case .recording(let started):
+                if let live = recorder.live {
                     Button { recorder.stop() } label: { Label("Stop", systemImage: "stop.circle.fill") }
                         .buttonStyle(.borderedProminent).tint(.red)
-                    Text("Recording · \(Recording.clock(ctx.date.timeIntervalSince(started)))").monospacedDigit()
+                    Text("Recording · \(Recording.clock(ctx.date.timeIntervalSince(live.startedAt)))").monospacedDigit()
+                }
+                switch recorder.state {
                 case .processing(let step, let p):
                     ProgressView(value: p).frame(width: 120)
                     Text("\(step)…").foregroundStyle(.secondary)
                 case .failed(let m):
-                    Button { recorder.start() } label: { Label("Record", systemImage: "record.circle") }
+                    if !recorder.isRecording { Button { recorder.start() } label: { Label("Record", systemImage: "record.circle") } }
                     Text(m).foregroundStyle(.orange).lineLimit(2)
                 case .idle:
-                    Button { recorder.start() } label: { Label("Record a meeting", systemImage: "record.circle") }
-                        .buttonStyle(.borderedProminent)
-                    Text("⌃⌥R · transcribed and separated by speaker on this Mac").font(.caption).foregroundStyle(.secondary)
+                    if !recorder.isRecording {
+                        Button { recorder.start() } label: { Label("Record a meeting", systemImage: "record.circle") }
+                            .buttonStyle(.borderedProminent)
+                        Text("⌃⌥R · transcribed and separated by speaker on this Mac").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
         }

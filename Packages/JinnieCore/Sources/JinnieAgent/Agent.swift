@@ -110,30 +110,32 @@ public final class Agent: @unchecked Sendable {
 
     /// Projects whose summary should be (re)written now, most recently active first:
     /// - learned about (has items) but never summarised;
-    /// - new items or actions since the last summary, at most every 2 hours;
-    /// - active in the last 30 days and the summary is over a day old (dates and overdue items move).
+    /// - something new since the last summary (items, actions, answers, role changes), at most once a day.
+    /// A summary re-reads the whole project (about $0.75–1.35 of the plan with its stakeholder brief), so nothing new
+    /// means no refresh.
     public static func projectsNeedingSummary(projects: [Project], items: [Item], actions: [Action], now: Date = Date()) -> [Project] {
         var latest: [String: Date] = [:]
         for i in items { for pid in i.projectIDs { latest[pid] = max(latest[pid] ?? .distantPast, i.updatedAt) } }
         for a in actions { if let pid = a.projectID { latest[pid] = max(latest[pid] ?? .distantPast, a.updatedAt) } }
+        for p in projects { if let c = p.changedAt { latest[p.id] = max(latest[p.id] ?? .distantPast, c) } }
         return projects.filter { p in
             guard p.status == .active, let activity = latest[p.id] else { return false }
             guard let at = p.summaryAt else { return true }
-            let age = now.timeIntervalSince(at)
-            // Easy on the plan's limits: new activity refreshes at most twice a day; otherwise daily, while active this week.
-            if activity > at && age > 12 * 3600 { return true }
-            return age > 24 * 3600 && now.timeIntervalSince(activity) < 7 * 86400
+            return activity > at && now.timeIntervalSince(at) > 20 * 3600
         }
         .sorted { (latest[$0.id] ?? .distantPast) > (latest[$1.id] ?? .distantPast) }
     }
 
     /// Keeps summaries fresh without being asked. A project seen for the first time gets its history scanned first.
+    /// One project per run and at least an hour apart, so the projects never refresh all at once.
     public func refreshSummaries(max: Int = 1) async {
         guard autoSummaries else { return }
+        if let last = store.meta("lastAutoSummary").flatMap(Double.init), Date().timeIntervalSince1970 - last < 3600 { return }
         let items = store.all(Item.self)
         let due = Agent.projectsNeedingSummary(projects: store.all(Project.self), items: items, actions: store.all(Action.self))
         for p in due.prefix(max) {
             log("Refreshing summary of \(p.name)…")
+            store.setMeta("lastAutoSummary", String(Date().timeIntervalSince1970))
             // A history scan costs a lot: only automatically for projects with real recent activity.
             let recent = items.filter { $0.projectIDs.contains(p.id) && $0.occurredAt > Date().addingTimeInterval(-14 * 86400) }.count
             let policy: ScanPolicy = recent >= 3 ? .ifNeverScanned : .never
@@ -319,9 +321,9 @@ public final class Agent: @unchecked Sendable {
             p.aliases = merge(p.aliases, u["addAliases"] as? [String])
             if let pn = u["project"] as? String, let proj = dir.project(named: pn), !p.projectIDs.contains(proj.id) { p.projectIDs.append(proj.id) }
             store.save(p)
-            // A changed role reshapes the project's stakeholder map: ask for a refresh now, not at the daily one.
+            // A changed role reshapes the project's stakeholder map: picked up by the next daily refresh.
             if u["role"] != nil {
-                for pid in p.projectIDs { if var proj = store.get(Project.self, pid) { proj.summaryRequestedAt = Date(); store.save(proj) } }
+                for pid in p.projectIDs { if var proj = store.get(Project.self, pid) { proj.changedAt = Date(); store.save(proj) } }
             }
             dir = Directory(store: store)
         }

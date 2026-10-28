@@ -128,14 +128,16 @@ func tempStore() throws -> Store {
     }
     let fresh = project("Learned", summaryAgo: nil)          // first items, never summarised → yes
     let empty = project("Empty", summaryAgo: nil)            // nothing known → no
-    let busy = project("Busy", summaryAgo: 13)               // new item after summary, summary 13h old → yes
-    let recent = project("Recent", summaryAgo: 5)            // new item but summarised 5h ago → wait (12 h minimum)
-    let stale = project("Stale", summaryAgo: 30)             // no news, but over a day old and active this week → yes
+    let busy = project("Busy", summaryAgo: 21)               // new item after summary, summary 21h old → yes
+    let recent = project("Recent", summaryAgo: 13)           // new item but summarised 13h ago → wait (daily)
+    let stale = project("Stale", summaryAgo: 30)             // nothing new since the summary → no, however old
     let dormant = project("Dormant", summaryAgo: 30)         // last activity 10 days ago → no
+    var answered = project("Answered", summaryAgo: 22)       // only an answer since the summary → yes, at the daily pace
+    answered.changedAt = now.addingTimeInterval(-3 * 3600)
     let items = [item(fresh, hoursAgo: 1), item(busy, hoursAgo: 0.5), item(recent, hoursAgo: 0.2),
-                 item(stale, hoursAgo: 48), item(dormant, hoursAgo: 24 * 10)]
-    let due = Agent.projectsNeedingSummary(projects: [fresh, empty, busy, recent, stale, dormant], items: items, actions: [], now: now)
-    #expect(due.map(\.name) == ["Busy", "Learned", "Stale"])
+                 item(stale, hoursAgo: 48), item(dormant, hoursAgo: 24 * 10), item(answered, hoursAgo: 40)]
+    let due = Agent.projectsNeedingSummary(projects: [fresh, empty, busy, recent, stale, dormant, answered], items: items, actions: [], now: now)
+    #expect(due.map(\.name) == ["Busy", "Learned", "Answered"])
 }
 
 @Test func legacyNotesAreOnlyRewrittenWhenUntouched() {

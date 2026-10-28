@@ -67,10 +67,10 @@ extension Agent {
         var complete = false   // the last page read had no next page
         for text in listed.toolResults("search_files") {
             guard let data = text.data(using: .utf8),
-                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  let found = obj["files"] as? [[String: Any]] else { continue }
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+            // An empty last page comes back as `{}` (no files, no next page): the listing is complete.
             complete = (obj["nextPageToken"] as? String)?.isEmpty ?? true
-            for f in found {
+            for f in obj["files"] as? [[String: Any]] ?? [] {
                 guard let id = f["id"] as? String, let mime = f["mimeType"] as? String, let modified = f["modifiedTime"] as? String else { continue }
                 files.append(DriveFile(id: id, title: f["title"] as? String ?? f["name"] as? String ?? "", mimeType: mime,
                                        modifiedTime: modified, url: f["viewUrl"] as? String ?? f["webViewLink"] as? String))

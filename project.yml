@@ -12,7 +12,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "8"
+    CURRENT_PROJECT_VERSION: "9"
     GENERATE_INFOPLIST_FILE: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -33,6 +33,12 @@ targets:
       - App/Shared
       - App/macOS
       - path: App/Assets.xcassets
+      - App/RecorderLink
+      - path: App/RecorderAgent/com.romadinov.jinnie.recorder.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
     dependencies:
       - package: JinnieCore
         product: JinnieCore
@@ -49,6 +55,17 @@ targets:
         codeSign: true
         copy:
           destination: executables
+      - target: JinnieGigaAM
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+      - target: JinnieRecorder
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LoginItems
     settings:
       base:
         PRODUCT_NAME: Jinnie
@@ -62,14 +79,52 @@ targets:
         ENABLE_APP_SANDBOX: NO
         # Apple Silicon only: transcription runs on the Neural Engine, and sherpa-onnx ships static arm64 libraries.
         ARCHS: arm64
-        SWIFT_OBJC_BRIDGING_HEADER: App/macOS/Jinnie-Bridging-Header.h
+      configs:
+        Release:
+          CODE_SIGN_ENTITLEMENTS: App/macOS/Jinnie-Release.entitlements
+  JinnieRecorder:
+    # Records calls even when Jinnie isn't running: a menu bar app started at login by launchd (and after a crash).
+    type: application
+    platform: macOS
+    sources:
+      - App/Recorder
+      - App/RecorderLink
+      - App/macOS/HotKey.swift
+    dependencies:
+      - package: JinnieCore
+        product: JinnieCore
+    settings:
+      base:
+        PRODUCT_NAME: JinnieRecorder
+        PRODUCT_BUNDLE_IDENTIFIER: com.romadinov.jinnie.recorder
+        INFOPLIST_FILE: App/Recorder/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: App/Recorder/Recorder.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+        ARCHS: arm64
+        SKIP_INSTALL: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+  JinnieGigaAM:
+    # GigaAM (sherpa-onnx, native C++) in its own process, embedded next to the app's executable: a fault in the engine
+    # ends only this helper.
+    type: tool
+    platform: macOS
+    sources:
+      - path: App/GigaAMHelper
+    settings:
+      base:
+        PRODUCT_NAME: jinnie-gigaam
+        PRODUCT_BUNDLE_IDENTIFIER: com.romadinov.jinnie.gigaam
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: YES
+        GENERATE_INFOPLIST_FILE: NO
+        ARCHS: arm64
+        SWIFT_OBJC_BRIDGING_HEADER: App/GigaAMHelper/GigaAM-Bridging-Header.h
         HEADER_SEARCH_PATHS: $(SRCROOT)/Vendor/sherpa-onnx/include
         LIBRARY_SEARCH_PATHS: $(SRCROOT)/Vendor/sherpa-onnx/lib
         OTHER_LDFLAGS: -lsherpa-onnx-c-api -lsherpa-onnx-core -lonnxruntime -lkaldi-native-fbank-core -lkaldi-decoder-core -lsherpa-onnx-fst -lsherpa-onnx-fstfar -lsherpa-onnx-kaldifst-core -lssentencepiece_core -lutf8proc -lkissfft-float -lc++
         ENABLE_USER_SCRIPT_SANDBOXING: NO
-      configs:
-        Release:
-          CODE_SIGN_ENTITLEMENTS: App/macOS/Jinnie-Release.entitlements
     preBuildScripts:
       - name: Fetch sherpa-onnx
         script: '"$SRCROOT/scripts/fetch-sherpa.sh"'

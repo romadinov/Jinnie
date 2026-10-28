@@ -5,6 +5,8 @@ import Observation
 /// GigaAM v3 (Sber, MIT licence): Russian speech recognition, run on this Mac through sherpa-onnx. Much better than Whisper
 /// on Russian conversation (tested on the owner's meetings), weaker on English words, so Whisper transcribes first and the
 /// Russian stretches are read again with GigaAM. The model (about 225 MB) downloads the first time it's chosen.
+/// The engine is native C++ and runs in a helper process (`jinnie-gigaam`, next to the app's executable): a fault in it
+/// once corrupted Jinnie's memory and crashed the app later, so now it can only end the helper, and Jinnie keeps Whisper's text.
 @MainActor @Observable
 final class GigaAM {
     static let shared = GigaAM()
@@ -21,25 +23,19 @@ final class GigaAM {
         FileManager.default.fileExists(atPath: modelDirectory.appendingPathComponent("encoder.int8.onnx").path)
     }
 
-    private var recognizer: Recognizer?
-    private var preparing: Task<Recognizer, Error>?
+    private var preparing: Task<Void, Error>?
 
     init() { status = Self.isDownloaded ? .ready : .notDownloaded }
 
-    /// Downloads (once) and loads the model.
-    func prepare() async throws -> Recognizer {
-        if let recognizer { return recognizer }
+    /// Downloads the model once.
+    func prepare() async throws {
+        if Self.isDownloaded { status = .ready; return }
         if let preparing { return try await preparing.value }
-        let t = Task<Recognizer, Error> { @MainActor in
+        let t = Task<Void, Error> { @MainActor in
             do {
-                if !Self.isDownloaded {
-                    status = .downloading
-                    try await Task.detached { try await Self.download() }.value
-                }
-                let r = try await Task.detached { try Recognizer(directory: Self.modelDirectory) }.value
-                recognizer = r
+                status = .downloading
+                try await Task.detached { try await Self.download() }.value
                 status = .ready
-                return r
             } catch {
                 status = .failed(error.localizedDescription)
                 throw error
@@ -47,7 +43,7 @@ final class GigaAM {
         }
         preparing = t
         defer { preparing = nil }
-        return try await t.value
+        try await t.value
     }
 
     nonisolated private static func download() async throws {
@@ -76,92 +72,95 @@ final class GigaAM {
         var errorDescription: String? { message }
     }
 
-    /// One loaded model. Decoding is serialised (sherpa-onnx recognizers aren't shared across threads here).
-    final class Recognizer: @unchecked Sendable {
-        private let handle: OpaquePointer
-        private let lock = NSLock()
-        private let strings: [UnsafeMutablePointer<CChar>]
+    nonisolated static var helper: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/jinnie-gigaam") }
 
-        init(directory: URL) throws {
-            var owned: [UnsafeMutablePointer<CChar>] = []
-            func c(_ s: String) -> UnsafePointer<CChar> {
-                let p = strdup(s)!
-                owned.append(p)
-                return UnsafePointer(p)
-            }
-            var config = SherpaOnnxOfflineRecognizerConfig()
-            config.feat_config.sample_rate = 16000
-            config.feat_config.feature_dim = 64
-            config.model_config.transducer.encoder = c(directory.appendingPathComponent("encoder.int8.onnx").path)
-            config.model_config.transducer.decoder = c(directory.appendingPathComponent("decoder.onnx").path)
-            config.model_config.transducer.joiner = c(directory.appendingPathComponent("joiner.onnx").path)
-            config.model_config.tokens = c(directory.appendingPathComponent("tokens.txt").path)
-            config.model_config.num_threads = 4
-            config.model_config.provider = c("cpu")
-            config.model_config.model_type = c("nemo_transducer")
-            config.decoding_method = c("greedy_search")
-            guard let h = SherpaOnnxCreateOfflineRecognizer(&config) else {
-                owned.forEach { free($0) }
-                throw Failure("Couldn't load the GigaAM model")
-            }
-            handle = h
-            strings = owned
+    /// Runs the helper on the clips (16 kHz mono) and returns one text per clip. Throws if the helper fails, crashes or
+    /// takes longer than about 1 s per second of audio plus a minute.
+    nonisolated static func transcribe(_ clips: [ArraySlice<Float>]) throws -> [String] {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("jinnie-gigaam-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var samples: [Float] = [], lines = ""
+        for c in clips {
+            lines += "\(samples.count) \(c.count)\n"
+            samples += c
         }
+        let audio = folder.appendingPathComponent("clips.f32"), input = folder.appendingPathComponent("clips.txt")
+        try samples.withUnsafeBufferPointer { try Data(buffer: $0).write(to: audio) }
+        try Data(lines.utf8).write(to: input)
 
-        deinit {
-            SherpaOnnxDestroyOfflineRecognizer(handle)
-            strings.forEach { free($0) }
+        let p = Process()
+        p.executableURL = helper
+        p.arguments = [modelDirectory.path, audio.path]
+        p.standardInput = try FileHandle(forReadingFrom: input)
+        let out = folder.appendingPathComponent("out.json"), err = folder.appendingPathComponent("err.txt")
+        FileManager.default.createFile(atPath: out.path, contents: nil)
+        FileManager.default.createFile(atPath: err.path, contents: nil)
+        p.standardOutput = try FileHandle(forWritingTo: out)
+        p.standardError = try FileHandle(forWritingTo: err)
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
+        try p.run()
+        if done.wait(timeout: .now() + 60 + Double(samples.count) / 16000) == .timedOut {
+            p.terminate()
+            throw Failure("GigaAM took too long")
         }
-
-        /// Text for 16 kHz mono audio (up to about 25 s at a time).
-        func transcribe(_ samples: ArraySlice<Float>) -> String {
-            lock.lock(); defer { lock.unlock() }
-            let rec = handle
-            guard let stream = SherpaOnnxCreateOfflineStream(rec) else { return "" }
-            defer { SherpaOnnxDestroyOfflineStream(stream) }
-            samples.withUnsafeBufferPointer { buf in
-                SherpaOnnxAcceptWaveformOffline(stream, 16000, buf.baseAddress, Int32(buf.count))
-            }
-            SherpaOnnxDecodeOfflineStream(rec, stream)
-            guard let r = SherpaOnnxGetOfflineStreamResult(stream) else { return "" }
-            defer { SherpaOnnxDestroyOfflineRecognizerResult(r) }
-            return r.pointee.text.map { String(cString: $0) }?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard p.terminationReason == .exit, p.terminationStatus == 0 else {
+            let why = (try? String(contentsOf: err, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw Failure(p.terminationReason == .uncaughtSignal ? "GigaAM crashed (signal \(p.terminationStatus))" : "GigaAM failed: \(why)")
         }
+        let texts = try JSONDecoder().decode([String].self, from: Data(contentsOf: out))
+        guard texts.count == clips.count else { throw Failure("GigaAM returned \(texts.count) of \(clips.count) clips") }
+        return texts
     }
 
     /// Reads the Russian stretches again with GigaAM: consecutive lines of one speaker, mostly Cyrillic, close together,
     /// up to 20 s, become one line with GigaAM's text (from that speaker's own track on a call). English lines keep
     /// Whisper's text, which handles English words better.
-    nonisolated static func refine(_ segments: [RecordedSegment], with recognizer: Recognizer,
-                                   track: (RecordedSegment) -> [Float]) -> [RecordedSegment] {
+    nonisolated static func refine(_ segments: [RecordedSegment], track: (RecordedSegment) -> [Float]) throws -> [RecordedSegment] {
         func russian(_ s: String) -> Bool {
             let letters = s.unicodeScalars.filter { CharacterSet.letters.contains($0) }
             guard letters.count >= 2 else { return false }
             return Double(letters.filter { (0x400...0x4FF).contains($0.value) }.count) / Double(letters.count) >= 0.5
         }
-        let sorted = segments.sorted { $0.start < $1.start }
-        var out: [RecordedSegment] = []
+        // Groups of Russian lines (one speaker, close together, up to 20 s) and the plain lines between them, in order.
+        enum Part { case keep(RecordedSegment), group([RecordedSegment]) }
+        var parts: [Part] = []
         var group: [RecordedSegment] = []
-        func flush() {
-            defer { group = [] }
-            guard let first = group.first, let last = group.last else { return }
-            let audio = track(first)
-            let lo = max(0, Int((first.start - 0.2) * 16000)), hi = min(audio.count, Int((last.end + 0.3) * 16000))
-            let text = hi > lo + 1600 ? Recording.withoutHallucinations(recognizer.transcribe(audio[lo..<hi])) : ""
-            if text.isEmpty { out += group } else {
-                out.append(RecordedSegment(speaker: first.speaker, start: first.start, end: last.end, text: text))
-            }
-        }
-        for s in sorted {
+        func flush() { if !group.isEmpty { parts.append(.group(group)); group = [] } }
+        for s in segments.sorted(by: { $0.start < $1.start }) {
             if russian(s.text), let first = group.first, let last = group.last,
                s.speaker == first.speaker, s.start - last.end <= 1.5, s.end - first.start <= 20 {
                 group.append(s)
             } else {
                 flush()
-                if russian(s.text) { group = [s] } else { out.append(s) }
+                if russian(s.text) { group = [s] } else { parts.append(.keep(s)) }
             }
         }
         flush()
+
+        var clips: [ArraySlice<Float>] = [], clipOf: [Int: Int] = [:]
+        for (i, part) in parts.enumerated() {
+            guard case .group(let g) = part, let first = g.first, let last = g.last else { continue }
+            let audio = track(first)
+            let lo = max(0, Int((first.start - 0.2) * 16000)), hi = min(audio.count, Int((last.end + 0.3) * 16000))
+            guard hi > lo + 1600 else { continue }
+            clipOf[i] = clips.count
+            clips.append(audio[lo..<hi])
+        }
+        let texts = clips.isEmpty ? [] : try transcribe(clips)
+
+        var out: [RecordedSegment] = []
+        for (i, part) in parts.enumerated() {
+            switch part {
+            case .keep(let s): out.append(s)
+            case .group(let g):
+                let text = clipOf[i].map { Recording.withoutHallucinations(texts[$0]) } ?? ""
+                if text.isEmpty { out += g } else {
+                    out.append(RecordedSegment(speaker: g[0].speaker, start: g[0].start, end: g[g.count - 1].end, text: text))
+                }
+            }
+        }
         return out
     }
 }

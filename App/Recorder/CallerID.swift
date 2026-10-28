@@ -39,7 +39,7 @@ enum CallerID {
     static func identify(pid: pid_t) -> Result {
         let strings = windowStrings(pid: pid)
         var result = Result()
-        let store = AppModel.shared.store
+        let store = CallRecorder.shared.store
         let dir = Directory(store: store)
         let me = OwnerProfile.current
         let contacts = contactsAllowed ? loadContacts() : []
