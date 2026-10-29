@@ -252,3 +252,28 @@ Things that cost time building Jinnie, and what to do instead.
   seconds; quitting Jinnie leaves it recording. A `.recording` row whose audio hasn't grown for 5 minutes is treated as
   orphaned; the recorder also hands over its own orphans when it starts. Permissions (TCC) are per app, so the recorder
   asks for Microphone, System Audio Recording, Contacts and Accessibility itself.
+
+- **Row ids must be unique across the whole List, not just their ForEach.** "Who was speaking?" nested each recording's
+  unnamed voices in a `ForEach(id: \.label)`; two recordings with an unnamed Speaker 3 shared id 2, and the Mac's table
+  showed one meeting's sample (and Name button) under the other. Flatten into one `ForEach` keyed by recording + label.
+
+- **No sideways ScrollView above a List on iOS.** A tab strip in a horizontal `ScrollView` (in a VStack or a top
+  `safeAreaInset`) took up space but drew nothing: the navigation bar adopted it as the page's scroll view and it
+  collapsed. `TabStrip` wraps with `FlowLayout` instead. Check new page chrome in the Simulator, not just the Mac.
+
+## Recordings must survive the recorder dying
+- An .m4a written by AVAudioFile gets its index (moov) only when the file is closed. A crash mid-call left three calls as
+  `ftyp` + raw AAC with no index: AVAudioFile error 1685348671 ('dta?'). Calls are now recorded as ADTS (.aac): every frame
+  has its own header, and an unclosed file reads up to the last frame (`RecordingFiles`).
+- Recovering an index-less m4a: the AAC packets start at 0x6000; libavcodec decodes them fed as one packet (the decoder
+  finds the frame ends), with extradata `14 08` (AAC-LC, 16 kHz, mono). Drop the first 2112 samples (encoder priming).
+- The crash itself (all four, 29–30 Oct): AirPods switching modes as a call started or ended. `installTap` used the input
+  node's output format (24 kHz) while the hardware was already at 48 kHz (or the reverse), and AVAudioEngine raised an
+  Objective-C exception ("Format mismatch"). Swift can't catch those; AppKit swallowed it in the middle of a main-actor
+  Task, which left the concurrency runtime's current-executor state dangling, and the next `MainActor.assumeIsolated`
+  (the once-a-second detector timer) crashed in `swift_task_isMainExecutorImpl` (EXC_BAD_ACCESS at 0x1e). Reproduced in
+  a small AppKit app. The log shows it: `log show --predicate 'processID == <pid>'` before the crash has the
+  "Format mismatch" line and an HIExceptions FAULT.
+- So: tap with the hardware's format (`inputFormat(forBus: 0)`), wrap `installTap`/`prepare` in
+  `catchingObjCExceptions` (JinnieObjC), and retry the microphone while the device settles. Timers hop with
+  `Task { @MainActor in }`. Same pattern in Dictation.

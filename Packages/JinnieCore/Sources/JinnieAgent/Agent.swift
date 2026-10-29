@@ -19,6 +19,12 @@ public final class Agent: @unchecked Sendable {
         self.store = store
         var claude = claude
         claude.onUsage = { [store] label, cost in Usage.record(label: label, cost: cost, store: store) }
+        claude.limitedUntil = { [store] in Agent.limitedUntil(store) }
+        claude.onLimit = { [store] reset in
+            // A reset time we can't read (or an odd one): try again in half an hour; one refused run costs nothing.
+            let until = reset.flatMap { $0 > Date() && $0 < Date().addingTimeInterval(8 * 86400) ? $0 : nil } ?? Date().addingTimeInterval(1800)
+            store.setMeta("claudeLimitedUntil", String(until.timeIntervalSince1970))
+        }
         self.claude = claude
         self.jinnieBinary = jinnieBinary
         self.log = log
@@ -68,6 +74,12 @@ public final class Agent: @unchecked Sendable {
         // Nothing to do for nobody: the owner profile comes from the setup assistant.
         guard OwnerProfile.exists else { log("Set up Jinnie first (owner profile missing)"); return }
         ensureOwner()
+        if force { claudeLimitedUntil = nil }
+        if let until = claudeLimitedUntil {
+            log("Claude usage limit reached; waiting until \(until.formatted(date: .abbreviated, time: .shortened))")
+            syncUberdoer()
+            return
+        }
         // Once: seed people from mail headers so first names resolve from day one.
         if store.meta("contactsLearned") == nil, isEnabled(.email) {
             do {
@@ -132,7 +144,10 @@ public final class Agent: @unchecked Sendable {
         guard autoSummaries else { return }
         if let last = store.meta("lastAutoSummary").flatMap(Double.init), Date().timeIntervalSince1970 - last < 3600 { return }
         let items = store.all(Item.self)
-        let due = Agent.projectsNeedingSummary(projects: store.all(Project.self), items: items, actions: store.all(Action.self))
+        // Projects of customers the owner doesn't care about only refresh when asked.
+        let ignored = Set(store.all(Customer.self).filter(\.isIgnored).map(\.id))
+        let projects = store.all(Project.self).filter { $0.customerID.map { !ignored.contains($0) } ?? true }
+        let due = Agent.projectsNeedingSummary(projects: projects, items: items, actions: store.all(Action.self))
         for p in due.prefix(max) {
             log("Refreshing summary of \(p.name)…")
             store.setMeta("lastAutoSummary", String(Date().timeIntervalSince1970))
@@ -144,6 +159,17 @@ public final class Agent: @unchecked Sendable {
     }
 
     // MARK: - Pause (limits)
+
+    /// The plan's usage limit was hit: nothing that needs Claude runs until this time. Recordings, notes and questions
+    /// stay pending and are read after it. Sync Now tries again earlier.
+    public var claudeLimitedUntil: Date? {
+        get { Agent.limitedUntil(store) }
+        set { store.setMeta("claudeLimitedUntil", newValue.map { String($0.timeIntervalSince1970) }) }
+    }
+
+    static func limitedUntil(_ store: Store) -> Date? {
+        store.meta("claudeLimitedUntil").flatMap(Double.init).map(Date.init(timeIntervalSince1970:)).flatMap { $0 > Date() ? $0 : nil }
+    }
 
     /// Background reading is paused until this time (the "Pause for today" menu item); notes, questions and Ask still run.
     public var pausedUntil: Date? {
@@ -227,7 +253,7 @@ public final class Agent: @unchecked Sendable {
     public func processNotes() async {
         let pending = store.all(Note.self).filter { $0.processedAt == nil && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { $0.createdAt < $1.createdAt }
-        guard !pending.isEmpty else { return }
+        guard !pending.isEmpty, claudeLimitedUntil == nil else { return }
         var run = RunLog(kind: "notes")
         store.save(run)
         for batch in stride(from: 0, to: pending.count, by: 15).map({ Array(pending[$0..<min($0 + 15, pending.count)]) }) {
@@ -243,7 +269,8 @@ public final class Agent: @unchecked Sendable {
                 }
                 run.message = stats.description
             } catch {
-                for var n in batch { n.processError = "\(error)"; store.save(n) }
+                // Over the plan's limit: the notes stay pending and are read once it resets.
+                if (error as? ClaudeError)?.isLimit != true { for var n in batch { n.processError = "\(error)"; store.save(n) } }
                 run.ok = false
                 run.message = "\(error)"
                 log("Notes failed: \(error)")

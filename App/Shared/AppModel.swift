@@ -335,6 +335,17 @@ final class AppModel {
     func forgetVoice(_ person: Person, sampleAt index: Int? = nil) { store.forgetVoice(personID: person.id, sampleAt: index) }
 
     @discardableResult
+    /// "I don't know" for a speaker: kept as an unnamed voice, recognised next time (see Store.markUnknownVoice).
+    func markUnknownVoice(_ rec: Recording, label: Int) {
+        store.markUnknownVoice(recordingID: rec.id, label: label)
+    }
+
+    /// An unknown voice is someone Jinnie knows: its recordings move to them.
+    func resolveUnknownVoice(_ voice: Person, as personID: String) {
+        store.resolveUnknownVoice(voice.id, as: personID)
+        AgentHooks.shared?.runNow()
+    }
+
     func addPerson(named name: String) -> Person? {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { return nil }

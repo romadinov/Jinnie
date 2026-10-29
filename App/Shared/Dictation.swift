@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import JinnieCore
 import Observation
 import Speech
 #if os(macOS)
@@ -140,25 +141,31 @@ final class Dictation {
             try session.setActive(true, options: .notifyOthersOnDeactivation)
             #endif
             let input = audio.inputNode
-            let inFormat = input.outputFormat(forBus: 0)
-            guard let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false),
+            // The hardware's format: the node's output format can lag behind AirPods switching modes, and a tap that
+            // doesn't match the hardware raises an exception (caught below rather than crashing the app).
+            let hw = input.inputFormat(forBus: 0)
+            guard hw.sampleRate > 0, hw.channelCount > 0,
+                  let inFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: hw.sampleRate, channels: hw.channelCount, interleaved: false),
+                  let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false),
                   let converter = AVAudioConverter(from: inFormat, to: outFormat) else {
                 state = .failed("Couldn't set up the microphone format."); return
             }
-            input.removeTap(onBus: 0)
-            input.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { [weak self] buffer, _ in
-                let cap = AVAudioFrameCount(Double(buffer.frameLength) * 16000 / inFormat.sampleRate + 32)
-                guard let out = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: cap) else { return }
-                var fed = false
-                converter.convert(to: out, error: nil) { _, status in
-                    if fed { status.pointee = .noDataNow; return nil }
-                    fed = true; status.pointee = .haveData; return buffer
+            try catchingObjCExceptions {
+                input.removeTap(onBus: 0)
+                input.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { [weak self] buffer, _ in
+                    let cap = AVAudioFrameCount(Double(buffer.frameLength) * 16000 / inFormat.sampleRate + 32)
+                    guard let out = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: cap) else { return }
+                    var fed = false
+                    converter.convert(to: out, error: nil) { _, status in
+                        if fed { status.pointee = .noDataNow; return nil }
+                        fed = true; status.pointee = .haveData; return buffer
+                    }
+                    guard let ch = out.floatChannelData?[0] else { return }
+                    let chunk = Array(UnsafeBufferPointer(start: ch, count: Int(out.frameLength)))
+                    Task { @MainActor in self?.appendWhisper(chunk) }
                 }
-                guard let ch = out.floatChannelData?[0] else { return }
-                let chunk = Array(UnsafeBufferPointer(start: ch, count: Int(out.frameLength)))
-                Task { @MainActor in self?.appendWhisper(chunk) }
+                audio.prepare()
             }
-            audio.prepare()
             try audio.start()
             state = .listening
             partialTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in

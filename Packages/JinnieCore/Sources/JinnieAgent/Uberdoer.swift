@@ -138,6 +138,15 @@ public final class Uberdoer: @unchecked Sendable {
 
     public func setNote(_ id: String, _ note: String) throws { try call("update_task", ["id": id, "note": note]) }
 
+    /// Title, project, due date and the waiting-for tag as edited in Jinnie (`""` clears the due date). Literal: no
+    /// shorthand parsing.
+    public func updateTask(_ id: String, title: String, project: String?, due: String?, waiting: Bool) throws {
+        var args: [String: Any] = ["id": id, "title": title, "literal": true, "due": due ?? ""]
+        args[waiting ? "add_tags" : "remove_tags"] = [JinnieConfig.uberdoerWaitingTag]
+        if let project { args["project"] = project }
+        try call("update_task", args)
+    }
+
     public func complete(_ id: String, undo: Bool = false) throws { try call("complete_task", ["id": id, "undo": undo]) }
     public func drop(_ id: String, undo: Bool = false) throws { try call("drop_task", ["id": id, "undo": undo]) }
 

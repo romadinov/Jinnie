@@ -4,6 +4,8 @@ import JinnieCore
 public struct ClaudeError: Error, CustomStringConvertible {
     public let message: String
     public var description: String { message }
+    /// The plan's usage limit refused the run ("You've hit your weekly limit · resets Oct 31 at 4pm (Australia/Melbourne)").
+    public var isLimit: Bool { Claude.isLimitMessage(message) }
 }
 
 public struct ClaudeResult: @unchecked Sendable {
@@ -54,6 +56,10 @@ public struct Claude: Sendable {
     public var workDirectory: URL
     /// Called after every run with its label and cost (subscription usage, priced as API-equivalent dollars).
     public var onUsage: (@Sendable (String, Double) -> Void)?
+    /// While this returns a future time, runs fail at once without starting `claude` (the plan's limit was hit).
+    public var limitedUntil: (@Sendable () -> Date?)?
+    /// Called when a run is refused by the plan's limit, with when it resets (nil: unknown).
+    public var onLimit: (@Sendable (Date?) -> Void)?
 
     public init(executable: String? = nil, model: String? = nil, workDirectory: URL? = nil) {
         self.executable = executable ?? Claude.locate() ?? "/opt/homebrew/bin/claude"
@@ -143,6 +149,9 @@ public struct Claude: Sendable {
     }
 
     public func run(_ call: Call) async throws -> ClaudeResult {
+        if let until = limitedUntil?() {
+            throw ClaudeError(message: "Claude usage limit reached; Jinnie waits until \(until.formatted(date: .abbreviated, time: .shortened))")
+        }
         try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
         // stream-json so every run leaves a transcript (agent/traces) showing which tools it used.
         var args = ["-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--permission-mode", "dontAsk",
@@ -180,6 +189,7 @@ public struct Claude: Sendable {
         }
         let text = obj["result"] as? String ?? ""
         if (obj["is_error"] as? Bool) == true {
+            if Claude.isLimitMessage(text) { onLimit?(Claude.limitReset(in: text)) }
             throw ClaudeError(message: "claude: \(text.isEmpty ? (obj["subtype"] as? String ?? "error") : text)")
         }
         let denials = (obj["permission_denials"] as? [[String: Any]] ?? []).compactMap { $0["tool_name"] as? String }
@@ -190,6 +200,35 @@ public struct Claude: Sendable {
                             durationMs: obj["duration_ms"] as? Int ?? 0,
                             denials: denials,
                             transcript: output.stdout)
+    }
+
+    static func isLimitMessage(_ s: String) -> Bool {
+        let l = s.lowercased()
+        return (l.contains("hit your") && l.contains("limit")) || l.contains("usage limit")
+    }
+
+    /// When the limit resets, from "… · resets Oct 31 at 4pm (Australia/Melbourne)" or "… · resets 4:30pm (…)".
+    static func limitReset(in text: String, now: Date = Date()) -> Date? {
+        guard let r = text.range(of: #"resets (.+?) \(([^)]+)\)"#, options: .regularExpression) else { return nil }
+        let m = String(text[r]).dropFirst("resets ".count)
+        guard let open = m.lastIndex(of: "(") else { return nil }
+        let when = m[..<open].trimmingCharacters(in: .whitespaces)
+        let zone = TimeZone(identifier: String(m[m.index(after: open)...].dropLast())) ?? .current
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = zone
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = zone
+        f.defaultDate = cal.startOfDay(for: now)  // the year and day the text leaves out, never the current minutes
+        for format in ["MMM d 'at' ha", "MMM d 'at' h:mma", "MMM d, ha", "ha", "h:mma"] {
+            f.dateFormat = format
+            guard var d = f.date(from: when) else { continue }
+            // Without a year (or a day), the parsed time may land in the past: the next such time is meant.
+            let step: Calendar.Component = format.hasPrefix("MMM") ? .year : .day
+            while d < now.addingTimeInterval(-3600) { d = cal.date(byAdding: step, value: 1, to: d) ?? d.addingTimeInterval(86400) }
+            return d
+        }
+        return nil
     }
 
     public var tracesDirectory: URL { workDirectory.appendingPathComponent("traces") }

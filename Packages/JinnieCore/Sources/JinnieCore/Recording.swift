@@ -480,13 +480,56 @@ public extension Store {
         save(p)
     }
 
-    /// Recordings that still have unnamed voices get another try with what Jinnie now knows.
+    /// Recordings that still have unnamed voices get another try with what Jinnie now knows. Only a real name makes the
+    /// agent read the transcript again; an unknown voice adds nothing to it.
     func relabelRecordings(except id: String? = nil) {
         let people = all(Person.self)
+        let unknown = Set(people.filter(\.isUnknownVoice).map(\.id))
         for var other in all(Recording.self) where other.id != id && other.status == .ready && !other.unnamedSpeakers.isEmpty {
             let before = other.speakers.map(\.personID)
             Voice.identify(&other.speakers, people: people)
-            if other.speakers.map(\.personID) != before { other.processedAt = nil; save(other) }
+            let named = zip(before, other.speakers.map(\.personID)).compactMap { $0 == $1 ? nil : $1 }
+            guard !named.isEmpty else { continue }
+            if named.contains(where: { !unknown.contains($0) }) { other.processedAt = nil }
+            save(other)
         }
+    }
+
+    /// An unknown voice turned out to be `targetID`: every recording with that voice is renamed (the voice moves to the
+    /// person, the transcripts are re-read) and the unknown voice is removed.
+    func resolveUnknownVoice(_ unknownID: String, as targetID: String) {
+        guard unknownID != targetID else { return }
+        for r in all(Recording.self) {
+            for s in r.speakers where s.personID == unknownID { assignSpeaker(recordingID: r.id, label: s.label, personID: targetID) }
+        }
+        if let p = get(Person.self, unknownID) { delete(p) }
+    }
+
+    /// An unknown voice was given a real name: its recordings are re-read with it.
+    func namedUnknownVoice(_ personID: String) {
+        for var r in all(Recording.self) where r.speakers.contains(where: { $0.personID == personID }) {
+            r.processedAt = nil
+            save(r)
+        }
+    }
+
+    /// "I don't know": the voice becomes an unnamed person ("Unknown voice 3") that learns it, so it leaves the list of
+    /// voices to name and is recognised in later recordings. The transcript isn't re-read (nothing new to learn).
+    @discardableResult
+    func markUnknownVoice(recordingID: String, label: Int) -> Person? {
+        guard var r = get(Recording.self, recordingID), let i = r.speakers.firstIndex(where: { $0.label == label }) else { return nil }
+        let n = all(Person.self).filter(\.isUnknownVoice)
+            .compactMap { Int($0.name.split(separator: " ").last ?? "") }.max() ?? 0
+        var p = Person(name: "Unknown voice \(n + 1)")
+        p.unknownVoice = true
+        if let e = r.speakers[i].embedding { Voice.learn(e, into: &p, recordingID: r.id, label: label) }
+        p = save(p)
+        r.speakers[i].personID = p.id
+        r.speakers[i].namedBy = .owner
+        r.speakers[i].match = nil
+        r.speakers[i].suggestedPersonID = nil
+        save(r)
+        relabelRecordings(except: r.id)
+        return p
     }
 }

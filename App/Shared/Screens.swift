@@ -136,70 +136,91 @@ extension View {
 
 struct TodayView: View {
     @Environment(AppModel.self) private var model
+    @AppStorage("today.tab") private var tab = Tab.questions
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case questions, speakers, news, next, waiting, recent
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .questions: "Questions"
+            case .speakers: "Who Spoke?"
+            case .news: "What's New"
+            case .next: "Next"
+            case .waiting: "Waiting"
+            case .recent: "Recent"
+            }
+        }
+    }
 
     var body: some View {
-        List {
-            #if os(iOS)
-            if model.projects.isEmpty && model.items.isEmpty {
-                Section {
-                    Label("Jinnie's agent runs on your Mac", systemImage: "desktopcomputer").font(.headline)
-                    Text("Install Jinnie for Mac (github.com/romadinov/Jinnie/releases), complete Set Up Jinnie there, and use the same Apple Account here. Projects, people and actions appear once it has read your sources. Notes you add here are processed by the Mac.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-            }
-            #endif
-            let problems = model.sourceProblems
-            if !problems.isEmpty {
-                Section {
-                    ForEach(problems, id: \.source) { p in
-                        Label {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("\(p.source.label) isn't being read").font(.body.weight(.semibold))
-                                Text(p.message).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-                            }
-                        } icon: { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
-                    }
-                    #if os(macOS)
-                    Button("Open Setup…") { SetupWindow.shared.show() }
-                    #else
-                    Text("Fix it on your Mac: Jinnie → Set Up Jinnie.").font(.caption).foregroundStyle(.secondary)
-                    #endif
-                }
-            }
-            if !model.openClarifications.isEmpty {
-                Panel(id: "today.questions", title: "Open questions", count: model.openClarifications.count) {
-                    ForEach(model.openClarifications.prefix(5)) { ClarificationRow(clarification: $0) }
-                    if model.openClarifications.count > 5 {
-                        NavigationLink("All \(model.openClarifications.count) questions") { QuestionsView() }
+        let news = model.latestNews(days: 7)
+        let count: [Tab: Int] = [.questions: model.openClarifications.count, .speakers: model.recordingsToName.count,
+                                 .news: news.count, .next: model.openNext.count, .waiting: model.openWaiting.count]
+        VStack(spacing: 0) {
+            TabStrip(tabs: Tab.allCases, selection: $tab, title: \.title) { count[$0, default: 0] }
+            Divider()
+            List {
+                #if os(iOS)
+                if model.projects.isEmpty && model.items.isEmpty {
+                    Section {
+                        Label("Jinnie's agent runs on your Mac", systemImage: "desktopcomputer").font(.headline)
+                        Text("Install Jinnie for Mac (github.com/romadinov/Jinnie/releases), complete Set Up Jinnie there, and use the same Apple Account here. Projects, people and actions appear once it has read your sources. Notes you add here are processed by the Mac.")
+                            .font(.callout).foregroundStyle(.secondary)
                     }
                 }
-            }
-            if !model.recordingsToName.isEmpty {
-                Panel(id: "today.recordings", title: "Who was speaking?", count: model.recordingsToName.count) {
-                    ForEach(model.recordingsToName.prefix(5)) { r in
-                        NavigationLink(value: Route.recording(r.id)) { RecordingRow(recording: r) }
-                        // Name them right here: play a sample, pick who it is.
-                        ForEach(r.unnamedSpeakers, id: \.label) { s in SpeakerRow(recording: r, speaker: s).padding(.leading, 20) }
+                #endif
+                let problems = model.sourceProblems
+                if !problems.isEmpty {
+                    Section {
+                        ForEach(problems, id: \.source) { p in
+                            Label {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(p.source.label) isn't being read").font(.body.weight(.semibold))
+                                    Text(p.message).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                                }
+                            } icon: { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                        }
+                        #if os(macOS)
+                        Button("Open Setup…") { SetupWindow.shared.show() }
+                        #else
+                        Text("Fix it on your Mac: Jinnie → Set Up Jinnie.").font(.caption).foregroundStyle(.secondary)
+                        #endif
                     }
                 }
-            }
-            let news = model.latestNews(days: 7)
-            if !news.isEmpty {
-                Panel(id: "today.news", title: "What's new", count: news.count) {
-                    ForEach(news.prefix(12), id: \.news) { NewsRow(news: $0.news, project: $0.project) }
-                }
-            }
-            Panel(id: "today.next", title: "Next actions", count: model.openNext.count) {
-                if model.openNext.isEmpty { Text("Nothing yet").foregroundStyle(.secondary) }
-                ForEach(model.openNext) { ActionRow(action: $0) }
-            }
-            Panel(id: "today.waiting", title: "Waiting for", count: model.openWaiting.count) {
-                if model.openWaiting.isEmpty { Text("Nobody owes you anything").foregroundStyle(.secondary) }
-                ForEach(model.openWaiting) { ActionRow(action: $0) }
-            }
-            Panel(id: "today.recent", title: "Recent") {
-                ForEach(model.items.prefix(25)) { item in
-                    ItemRow(item: item)
+                switch tab {
+                case .questions:
+                    if model.openClarifications.isEmpty { Text("Nothing to check").foregroundStyle(.secondary) }
+                    ForEach(model.openClarifications) { ClarificationRow(clarification: $0) }
+                case .speakers:
+                    if model.recordingsToName.isEmpty { Text("Every voice has a name").foregroundStyle(.secondary) }
+                    // One flat list of rows, each identified by recording and speaker: nested ForEach rows keyed by the label
+                    // alone let the Mac's table reuse another recording's "Speaker 3" (its sample, and its Name button).
+                    ForEach(model.recordingsToName.flatMap { r in
+                        [ToNameRow(recording: r, speaker: nil)] + r.unnamedSpeakers.map { ToNameRow(recording: r, speaker: $0) }
+                    }) { row in
+                        if let s = row.speaker {
+                            // Name them right here: play a sample, pick who it is.
+                            SpeakerRow(recording: row.recording, speaker: s).padding(.leading, 20)
+                        } else {
+                            NavigationLink(value: Route.recording(row.recording.id)) { RecordingRow(recording: row.recording) }
+                        }
+                    }
+                case .news:
+                    if news.isEmpty { Text("Nothing new this week").foregroundStyle(.secondary) }
+                    ForEach(news.prefix(30), id: \.news) { NewsRow(news: $0.news, project: $0.project) }
+                case .next:
+                    if model.openNext.isEmpty { Text("Nothing yet").foregroundStyle(.secondary) }
+                    ForEach(model.openNext) { ActionRow(action: $0) }
+                    AddActionButton(kind: .next)
+                case .waiting:
+                    if model.openWaiting.isEmpty { Text("Nobody owes you anything").foregroundStyle(.secondary) }
+                    ForEach(model.openWaiting) { ActionRow(action: $0) }
+                    AddActionButton(kind: .waiting)
+                case .recent:
+                    ForEach(model.items.prefix(25)) { item in
+                        ItemRow(item: item)
+                    }
                 }
             }
         }
@@ -207,6 +228,13 @@ struct TodayView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { ComposeBar() }
         .navigationTitle("Today")
     }
+}
+
+/// A row of "Who was speaking?": the recording itself (no speaker) or one of its unnamed voices.
+private struct ToNameRow: Identifiable {
+    let recording: Recording
+    let speaker: RecordedSpeaker?
+    var id: String { recording.id + "/" + (speaker.map { String($0.label) } ?? "") }
 }
 
 // MARK: - Open questions
@@ -278,6 +306,7 @@ struct ActionsView: View {
     @Environment(AppModel.self) private var model
     @State private var kind: Action.Kind = .next
     @State private var showClosed = false
+    @State private var adding: Action?
 
     var body: some View {
         let list = model.actions.filter { $0.kind == kind && (showClosed || model.isListed($0)) }
@@ -291,6 +320,7 @@ struct ActionsView: View {
         }
         .overlay { if list.isEmpty { EmptyHint(title: "No actions", systemImage: "checklist") } }
         .toolbar {
+            ToolbarItem { Button { adding = Action(kind: kind, title: "") } label: { Label("Add Action", systemImage: "plus") } }
             ToolbarItem(placement: .principal) {
                 Picker("Kind", selection: $kind) {
                     Text("Next").tag(Action.Kind.next)
@@ -304,6 +334,7 @@ struct ActionsView: View {
             }
             #endif
         }
+        .sheet(item: $adding) { QuickAddActions(template: $0) }
         .navigationTitle("Actions")
     }
 }
@@ -425,9 +456,11 @@ struct ProjectDetail: View {
                 let acts = model.actions(for: p).filter { model.isListed($0) }
                 Panel(id: "project.next", title: "Next actions", count: acts.filter { $0.kind == .next }.count) {
                     ForEach(acts.filter { $0.kind == .next }) { ActionRow(action: $0, showProject: false) }
+                    AddActionButton(kind: .next, projectID: p.id)
                 }
                 Panel(id: "project.waiting", title: "Waiting for", count: acts.filter { $0.kind == .waiting }.count) {
                     ForEach(acts.filter { $0.kind == .waiting }) { ActionRow(action: $0, showProject: false) }
+                    AddActionButton(kind: .waiting, projectID: p.id)
                 }
                 let docs = model.documents(for: p)
                 if !docs.isEmpty {
@@ -578,25 +611,35 @@ struct PeopleView: View {
     @State private var query = ""
 
     var body: some View {
-        let list = query.isEmpty ? model.people : model.people.filter {
+        let found = query.isEmpty ? model.people : model.people.filter {
             $0.searchText.localizedCaseInsensitiveContains(query)
         }
-        List(list) { p in
-            NavigationLink(value: Route.person(p.id)) {
-                VStack(alignment: .leading) {
-                    Text(p.name)
-                    Text(([p.org] + p.projectIDs.map { model.project($0)?.name }).compactMap { $0 }.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.secondary)
+        let list = found.filter { !$0.isUnknownVoice }, voices = found.filter(\.isUnknownVoice)
+        List {
+            ForEach(list) { p in personRow(p) }
+            if !voices.isEmpty {
+                Panel(id: "people.unknownVoices", title: "Unknown voices", count: voices.count) {
+                    ForEach(voices) { p in personRow(p) }
                 }
-            }
-            .textSelection(.disabled)
-            .contextMenu {
-                Button { Clipboard.copy(p.name) } label: { Label("Copy Name", systemImage: "doc.on.doc") }
-                if let e = p.emails.first { Button { Clipboard.copy(e) } label: { Label("Copy \(e)", systemImage: "envelope") } }
             }
         }
         .searchable(text: $query)
         .navigationTitle("People")
+    }
+
+    func personRow(_ p: Person) -> some View {
+        NavigationLink(value: Route.person(p.id)) {
+            VStack(alignment: .leading) {
+                Text(p.name)
+                Text(([p.org] + p.projectIDs.map { model.project($0)?.name }).compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .textSelection(.disabled)
+        .contextMenu {
+            Button { Clipboard.copy(p.name) } label: { Label("Copy Name", systemImage: "doc.on.doc") }
+            if let e = p.emails.first { Button { Clipboard.copy(e) } label: { Label("Copy \(e)", systemImage: "envelope") } }
+        }
     }
 }
 
@@ -636,10 +679,21 @@ struct PersonDetail: View {
     @Environment(AppModel.self) private var model
     let personID: String
     @State private var editing = false
+    @State private var identifying = false
 
     var body: some View {
         if let p = model.person(personID) {
             List {
+                if p.isUnknownVoice {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("A voice you didn't know. Jinnie recognises it in recordings and doesn't ask about it again.")
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("This Is…") { identifying = true }
+                            Text("or rename it in Edit").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Section {
                     ForEach(p.emails, id: \.self) { e in LabeledContent("Email", value: e) }
                     if let org = p.org { LabeledContent("Organisation", value: org) }
@@ -656,6 +710,10 @@ struct PersonDetail: View {
                 if !acts.isEmpty {
                     Panel(id: "person.actions", title: "Actions", count: acts.count) { ForEach(acts) { ActionRow(action: $0) } }
                 }
+                HStack(spacing: 16) {
+                    AddActionButton(kind: .next, personID: p.id)
+                    AddActionButton(kind: .waiting, personID: p.id)
+                }
                 VoicePanel(person: p)
                 Panel(id: "person.timeline", title: "Timeline", count: model.items(for: p).count) {
                     ForEach(model.items(for: p).prefix(100)) { item in
@@ -666,6 +724,12 @@ struct PersonDetail: View {
             .navigationTitle(p.name)
             .toolbar { Button("Edit") { editing = true } }
             .sheet(isPresented: $editing) { PersonEditor(person: p) }
+            .sheet(isPresented: $identifying) {
+                PersonPicker(title: "Who is \(p.name)?") { id in
+                    identifying = false
+                    model.resolveUnknownVoice(p, as: id)
+                } onCancel: { identifying = false }
+            }
         }
     }
 }
@@ -707,7 +771,12 @@ struct PersonEditor: View {
                         person.org = org.isEmpty ? nil : org
                         person.role = role.isEmpty ? nil : role
                         person.projectIDs = Array(projects)
-                        model.save(person); dismiss()
+                        // An unknown voice given a real name is a person now; its recordings are re-read with the name.
+                        let named = person.isUnknownVoice && person.name != model.person(person.id)?.name
+                        if named { person.unknownVoice = nil }
+                        model.save(person)
+                        if named { model.store.namedUnknownVoice(person.id); AgentHooks.shared?.runNow() }
+                        dismiss()
                     }
                 }
             }
@@ -919,8 +988,9 @@ struct RouteView: View {
 }
 
 enum Section_: String, CaseIterable, Identifiable {
-    case today = "Today", notes = "Notes", actions = "Actions", customers = "Customers", projects = "Projects", people = "People",
-         questions = "Questions", recordings = "Recordings", ask = "Ask", search = "Search", activity = "Activity"
+    // The Mac sidebar lists them in this order.
+    case today = "Today", ask = "Ask", notes = "Notes", actions = "Actions", customers = "Customers", projects = "Projects", people = "People",
+         questions = "Questions", recordings = "Recordings", search = "Search", activity = "Activity"
     var id: String { rawValue }
     var symbol: String {
         switch self {

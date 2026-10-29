@@ -166,6 +166,11 @@ struct AgentStatusFooter: View {
                 if agent.isRunning { ProgressView().controlSize(.mini) } else { Image(systemName: "checkmark.circle").foregroundStyle(.green) }
                 Text(agent.isRunning ? agent.current : "Idle").lineLimit(1)
             }
+            if let until = agent.agent.claudeLimitedUntil {
+                // Recording and transcription go on; reading waits for the plan's limit to reset.
+                Text("Claude limit reached · reading resumes \(until.formatted(date: .abbreviated, time: .shortened))")
+                    .foregroundStyle(.orange)
+            }
             if let last = agent.lastCycle {
                 Text("Last run \(last.formatted(.relative(presentation: .named)))").foregroundStyle(.secondary)
             }

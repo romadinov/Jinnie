@@ -69,8 +69,10 @@ final class MeetingDetector {
 
     func start() {
         timer?.invalidate()
+        // Hops with a Task rather than MainActor.assumeIsolated: the executor check inside assumeIsolated crashed the
+        // recorder from this timer mid-call (EXC_BAD_ACCESS at 0x1e in swift_task_isMainExecutorImpl), losing the audio.
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-            MainActor.assumeIsolated { MeetingDetector.shared.poll() }
+            Task { @MainActor in MeetingDetector.shared.poll() }
         }
     }
 
@@ -83,11 +85,9 @@ final class MeetingDetector {
         polling = true
         DispatchQueue.global(qos: .utility).async {
             let procs = AudioProcess.all()
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    MeetingDetector.shared.polling = false
-                    MeetingDetector.shared.tick(procs)
-                }
+            Task { @MainActor in
+                MeetingDetector.shared.polling = false
+                MeetingDetector.shared.tick(procs)
             }
         }
     }
@@ -238,7 +238,7 @@ final class MeetingPrompt {
         let seconds: TimeInterval
         switch kind { case .ask: seconds = 120; case .started: seconds = 20; case .privateCall: seconds = 25 }
         closeTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { _ in
-            MainActor.assumeIsolated { onAnswer?(false); MeetingPrompt.shared.close() }
+            Task { @MainActor in onAnswer?(false); MeetingPrompt.shared.close() }
         }
     }
 

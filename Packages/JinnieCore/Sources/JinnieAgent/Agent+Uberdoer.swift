@@ -39,6 +39,10 @@ extension Agent {
                 do {
                     if let tid = a.uberdoerID {
                         guard let t = try ud.task(tid) else { continue }
+                        if a.needsEditPush == true {
+                            try pushEdits(&a, ud: ud, dir: projects)
+                            store.save(a)
+                        }
                         if a.needsPush == true {
                             if try pushStatus(&a, task: t, ud: ud) { closedThere += 1 }
                             store.save(a)
@@ -62,7 +66,7 @@ extension Agent {
                     }
                     let person = projects.person(id: a.personID)
                     let project = projects.project(id: a.projectID)
-                    let title = a.kind == .waiting ? "\(person?.name ?? a.personName ?? "Someone")//\(a.title)" : a.title
+                    let title = Agent.taskTitle(a, person: person)
                     var tags = [JinnieConfig.uberdoerTag]
                     if a.kind == .waiting { tags.append(JinnieConfig.uberdoerWaitingTag) }
                     let body = note(for: a, person: person)
@@ -138,14 +142,32 @@ extension Agent {
         return changed
     }
 
-    /// Pushes only status changes made in Jinnie. Cheap, touches nothing else, safe to run during a cycle.
+    /// The task's title in Uberdoer: "Person//what" for waiting-for.
+    static func taskTitle(_ a: Action, person: Person?) -> String {
+        a.kind == .waiting ? "\(person?.name ?? a.personName ?? "Someone")//\(a.title)" : a.title
+    }
+
+    /// An action edited in Jinnie: title, project and due date go to the task (the note follows through refreshNote).
+    func pushEdits(_ a: inout Action, ud: Uberdoer, dir: Directory) throws {
+        guard let tid = a.uberdoerID else { return }
+        let person = dir.person(id: a.personID)
+        try ud.updateTask(tid, title: Agent.taskTitle(a, person: person), project: dir.project(id: a.projectID)?.uberdoerPath,
+                          due: a.due, waiting: a.kind == .waiting)
+        if let t = try ud.task(tid) { _ = try refreshNote(&a, task: t, ud: ud, person: person) }
+        a.needsEditPush = nil
+        a.uberdoerChanged = try ud.task(tid)?.changed
+        log("Uberdoer: edited “\(a.title)”")
+    }
+
+    /// Pushes only status changes and edits made in Jinnie. Cheap, touches nothing else, safe to run during a cycle.
     public func pushStatusChanges() {
-        let pending = store.all(Action.self).filter { $0.needsPush == true && $0.uberdoerID != nil }
+        let pending = store.all(Action.self).filter { ($0.needsPush == true || $0.needsEditPush == true) && $0.uberdoerID != nil }
         guard !pending.isEmpty, Uberdoer.isInstalled, let ud = try? Uberdoer() else { return }
         for var a in pending {
             do {
                 guard let t = try ud.task(a.uberdoerID!) else { continue }
-                if try pushStatus(&a, task: t, ud: ud) { log("Uberdoer: \(a.status.rawValue) “\(a.title)”") }
+                if a.needsPush == true, try pushStatus(&a, task: t, ud: ud) { log("Uberdoer: \(a.status.rawValue) “\(a.title)”") }
+                if a.needsEditPush == true { try pushEdits(&a, ud: ud, dir: Directory(store: store)) }
                 store.save(a)
             } catch { log("Uberdoer push failed for \(a.title): \(error)") }
         }
@@ -326,6 +348,7 @@ extension Agent {
 
     /// Answers questions asked on any device (e.g. the iPhone) that have no answer yet.
     public func answerQuestions() async {
+        guard claudeLimitedUntil == nil else { return }
         for var q in store.all(Question.self) where q.answer == nil && q.error == nil {
             // The fast lane and a background cycle may both get here: each question is answered once.
             guard claimQuestion(q.id) else { continue }
@@ -338,6 +361,8 @@ extension Agent {
                 q.answer = try await ask(q.text, earlier: Array(earlier))
                 q.answeredAt = Date()
             } catch {
+                // Over the plan's limit: the question waits and is answered once it resets.
+                if (error as? ClaudeError)?.isLimit == true { return }
                 q.error = "\(error)"
             }
             store.save(q)

@@ -79,10 +79,13 @@ public struct Customer: Entity {
     public var description: String = ""
     /// A potential customer: a presales opportunity, not a client yet.
     public var prospect: Bool?
+    /// The owner doesn't care about it: listed apart, and its projects aren't refreshed automatically.
+    public var ignored: Bool?
 
     public init(name: String) { self.name = name }
 
     public var isProspect: Bool { prospect == true }
+    public var isIgnored: Bool { ignored == true }
     public var searchText: String { ([name] + aliases + domains + [description]).joined(separator: " ") }
 }
 
@@ -135,6 +138,9 @@ public struct Person: Entity {
     public var projectIDs: [String] = []
     public var notes: String = ""
     public var isMe = false
+    /// A voice the owner couldn't name ("Unknown voice 2"): kept so Jinnie recognises it next time and doesn't ask again.
+    /// Renaming the person names the voice everywhere.
+    public var unknownVoice: Bool?
     /// Voice samples (speaker embeddings) from recordings where this person was identified; newest last, at most 8.
     public var voiceSamples: [VoiceSample]?
 
@@ -143,6 +149,7 @@ public struct Person: Entity {
     public var naturalKey: String? { emails.first.map { "email:" + $0.lowercased() } }
     public var searchText: String { ([name] + emails + aliases + [org ?? "", role ?? "", notes]).joined(separator: " ") }
     public var display: String { emails.first.map { "\(name) <\($0)>" } ?? name }
+    public var isUnknownVoice: Bool { unknownVoice == true }
     public var firstName: String { name.split(separator: " ").first.map(String.init) ?? name }
 }
 
@@ -268,6 +275,8 @@ public struct Action: Entity {
     public var syncError: String?
     /// Jinnie changed `status` itself (e.g. saw the item delivered); Uberdoer must follow.
     public var needsPush: Bool?
+    /// Title, person, project or due date edited in Jinnie: the Uberdoer task gets them on the next sync.
+    public var needsEditPush: Bool?
     /// Why this action exists: background, who asked, what "done" looks like (from the source).
     public var context: String?
     /// The words in the source where the commitment or request was made.

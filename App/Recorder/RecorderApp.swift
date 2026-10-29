@@ -19,6 +19,7 @@ struct JinnieRecorderApp: App {
     }
 }
 
+@MainActor
 final class RecorderDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // launchd starts exactly one; an extra copy (opened by hand) leaves.
@@ -26,11 +27,9 @@ final class RecorderDelegate: NSObject, NSApplicationDelegate {
         if NSRunningApplication.runningApplications(withBundleIdentifier: RecorderLink.recorderBundleID).contains(where: { $0.processIdentifier != me }) {
             exit(0)
         }
-        MainActor.assumeIsolated {
-            CallRecorder.shared.finishOrphans()
-            MeetingDetector.shared.start()
-            RecorderHotKey.apply()
-        }
+        CallRecorder.shared.finishOrphans()
+        MeetingDetector.shared.start()
+        RecorderHotKey.apply()
         RecorderLink.onCommand { command in
             Task { @MainActor in
                 let r = CallRecorder.shared
@@ -46,7 +45,7 @@ final class RecorderDelegate: NSObject, NSApplicationDelegate {
 
     /// Quitting (or logging out) mid-call keeps what was recorded: it goes to Jinnie like a stopped recording.
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { CallRecorder.shared.stop() }
+        CallRecorder.shared.stop()
     }
 }
 
@@ -55,7 +54,7 @@ enum RecorderHotKey {
     /// ⌃⌥R (or the shortcut set in Jinnie's Settings): start or stop a recording.
     @MainActor static func apply() {
         let saved = RecorderLink.defaults.data(forKey: RecorderSettings.recordKey).flatMap { try? JSONDecoder().decode(Shortcut.self, from: $0) }
-        HotKeyCenter.shared.register(id: 3, saved ?? defaultShortcut) { MainActor.assumeIsolated { CallRecorder.shared.toggle() } }
+        HotKeyCenter.shared.register(id: 3, saved ?? defaultShortcut) { Task { @MainActor in CallRecorder.shared.toggle() } }
     }
 }
 

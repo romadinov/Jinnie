@@ -10,6 +10,7 @@ extension Agent {
     }
 
     public func processRecordings() async {
+        guard claudeLimitedUntil == nil else { return }
         for rec in pendingRecordings.sorted(by: { $0.startedAt < $1.startedAt }) {
             var run = RunLog(kind: "recording")
             store.save(run)
@@ -20,6 +21,8 @@ extension Agent {
                 run.ok = false
                 run.message = "\(rec.title): \(error)"
                 log("Recording failed: \(error)")
+                // Over the plan's limit: this and the rest stay pending until it resets.
+                if (error as? ClaudeError)?.isLimit == true { run.finishedAt = Date(); store.save(run); return }
             }
             run.finishedAt = Date()
             store.save(run)

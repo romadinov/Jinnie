@@ -6,34 +6,48 @@ import SwiftUI
 struct CustomersView: View {
     @Environment(AppModel.self) private var model
     @State private var adding: Customer?
+    @AppStorage("customers.tab") private var tab = Tab.customers
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case customers, potential, internalWork, ignored
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .customers: "Customers"
+            case .potential: "Potential"
+            case .internalWork: "Internal"
+            case .ignored: "Not Interested"
+            }
+        }
+    }
 
     var body: some View {
         let entries = model.customers.map { c in (customer: c, last: model.lastActivity(model.items(for: c))) }
             .sorted { ($0.last ?? .distantPast) > ($1.last ?? .distantPast) }
-        List {
-            if entries.isEmpty {
-                Text("No customers yet. Jinnie groups your projects by customer on its next sync; you can also set a project's customer in Edit.")
-                    .foregroundStyle(.secondary)
-            }
-            let clients = entries.filter { !$0.customer.isProspect }
-            let prospects = entries.filter { $0.customer.isProspect }
-            if !clients.isEmpty {
-                Section {
-                    ForEach(clients, id: \.customer.id) { e in
-                        NavigationLink(value: Route.customer(e.customer.id)) { CustomerRow(customer: e.customer, last: e.last) }
+        let clients = entries.filter { !$0.customer.isIgnored && !$0.customer.isProspect }
+        let prospects = entries.filter { !$0.customer.isIgnored && $0.customer.isProspect }
+        let ignored = entries.filter { $0.customer.isIgnored }
+        let internalWork = model.projects.filter { $0.customerID == nil && $0.status != .done }
+        let count: [Tab: Int] = [.customers: clients.count, .potential: prospects.count, .internalWork: internalWork.count, .ignored: ignored.count]
+        VStack(spacing: 0) {
+            TabStrip(tabs: Tab.allCases, selection: $tab, title: \.title) { count[$0, default: 0] }
+            Divider()
+            List {
+                switch tab {
+                case .customers, .potential, .ignored:
+                    let shown = tab == .customers ? clients : tab == .potential ? prospects : ignored
+                    if shown.isEmpty {
+                        Text(emptyText).foregroundStyle(.secondary)
                     }
-                }
-            }
-            if !prospects.isEmpty {
-                Panel(id: "customers.prospects", title: "Potential customers", count: prospects.count) {
-                    ForEach(prospects, id: \.customer.id) { e in
+                    ForEach(shown, id: \.customer.id) { e in
                         NavigationLink(value: Route.customer(e.customer.id)) { CustomerRow(customer: e.customer, last: e.last) }
+                            .contextMenu { IgnoreCustomerButton(customer: e.customer) }
+                            #if os(iOS)
+                            .swipeActions { IgnoreCustomerButton(customer: e.customer).tint(e.customer.isIgnored ? .blue : .gray) }
+                            #endif
                     }
-                }
-            }
-            let internalWork = model.projects.filter { $0.customerID == nil && $0.status != .done }
-            if !internalWork.isEmpty {
-                Panel(id: "customers.internal", title: "Internal projects", count: internalWork.count) {
+                case .internalWork:
+                    if internalWork.isEmpty { Text("No internal projects").foregroundStyle(.secondary) }
                     ForEach(internalWork) { p in
                         NavigationLink(value: Route.project(p.id)) { Text(p.name) }
                     }
@@ -49,6 +63,31 @@ struct CustomersView: View {
             } label: { Label("Add Customer", systemImage: "plus") }
         }
         .sheet(item: $adding) { CustomerEditor(customer: $0) }
+    }
+
+    var emptyText: String {
+        switch tab {
+        case .customers: "No customers yet. Jinnie groups your projects by customer on its next sync; you can also set a project's customer in Edit."
+        case .potential: "No potential customers yet. Jinnie finds them in your sales and presales work each week."
+        case .ignored: "Customers and opportunities you don't care about go here (right-click one → Not Interested). Jinnie doesn't refresh their projects on its own."
+        case .internalWork: ""
+        }
+    }
+}
+
+/// Moves a customer or opportunity to "Not interested" and back.
+struct IgnoreCustomerButton: View {
+    @Environment(AppModel.self) private var model
+    let customer: Customer
+
+    var body: some View {
+        Button {
+            var c = customer
+            c.ignored = c.isIgnored ? nil : true
+            model.save(c)
+        } label: {
+            customer.isIgnored ? Label("Interested Again", systemImage: "eye") : Label("Not Interested", systemImage: "eye.slash")
+        }
     }
 }
 
@@ -89,8 +128,12 @@ struct CustomerDetail: View {
     var body: some View {
         if let c = model.customer(customerID) {
             List {
-                if c.isProspect || !c.description.isEmpty || !c.domains.isEmpty {
+                if c.isIgnored || c.isProspect || !c.description.isEmpty || !c.domains.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
+                        if c.isIgnored {
+                            Label("Not interested: Jinnie doesn't refresh these projects on its own", systemImage: "eye.slash")
+                                .font(.callout.weight(.medium)).foregroundStyle(.secondary)
+                        }
                         if c.isProspect {
                             Label("Potential customer: presales opportunity", systemImage: "sparkle.magnifyingglass")
                                 .font(.callout.weight(.medium)).foregroundStyle(.orange)
@@ -118,9 +161,11 @@ struct CustomerDetail: View {
                 let acts = model.actions(for: c).filter { model.isListed($0) }
                 Panel(id: "customer.next", title: "Next actions", count: acts.filter { $0.kind == .next }.count) {
                     ForEach(acts.filter { $0.kind == .next }) { ActionRow(action: $0, showProject: projects.count > 1) }
+                    AddActionButton(kind: .next, projectID: projects.first?.id)
                 }
                 Panel(id: "customer.waiting", title: "Waiting for", count: acts.filter { $0.kind == .waiting }.count) {
                     ForEach(acts.filter { $0.kind == .waiting }) { ActionRow(action: $0, showProject: projects.count > 1) }
+                    AddActionButton(kind: .waiting, projectID: projects.first?.id)
                 }
                 let contacts = model.contacts(for: c)
                 if !contacts.isEmpty {
@@ -158,6 +203,7 @@ struct CustomerDetail: View {
                     Button("Scan History") { hooks.scanCustomer(c.id) }
                         .help("Read meetings, mail, documents and Slack about \(c.name) from the last 6 months")
                 }
+                IgnoreCustomerButton(customer: c)
                 Button("Edit") { editing = true }
             }
             .sheet(isPresented: $editing) { CustomerEditor(customer: c) }
@@ -183,6 +229,7 @@ struct CustomerEditor: View {
                 TextField("Email domains", text: $domains)
                 TextField("Description", text: $customer.description, axis: .vertical)
                 Toggle("Potential customer (presales opportunity)", isOn: Binding(get: { customer.isProspect }, set: { customer.prospect = $0 ? true : nil }))
+                Toggle("Not interested (listed apart, not refreshed on its own)", isOn: Binding(get: { customer.isIgnored }, set: { customer.ignored = $0 ? true : nil }))
                 let saved = model.customer(customer.id) != nil
                 if saved {
                 Section("Projects") {

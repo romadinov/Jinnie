@@ -29,9 +29,9 @@ final class MeetingRecorder {
     private var draining = false
 
     static var folder: URL { JinnieConfig.supportDirectory().appendingPathComponent("recordings", isDirectory: true) }
-    static func audioURL(_ id: String) -> URL { folder.appendingPathComponent("\(id).m4a") }
+    static func audioURL(_ id: String) -> URL { RecordingFiles.url(in: folder, "\(id)") }
     /// The meeting app's audio (the other participants), recorded alongside the microphone.
-    static func systemURL(_ id: String) -> URL { folder.appendingPathComponent("\(id)-meeting.m4a") }
+    static func systemURL(_ id: String) -> URL { RecordingFiles.url(in: folder, "\(id)-meeting") }
 
     // MARK: Recording (done by Jinnie Recorder)
 

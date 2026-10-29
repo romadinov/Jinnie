@@ -115,7 +115,7 @@ public struct Directory: Sendable {
         }
         lines.append("")
         lines.append("PEOPLE (name | emails | aliases | org | role | projects):")
-        for p in people.filter({ !$0.isMe }).prefix(maxPeople) {
+        for p in people.filter({ !$0.isMe && !$0.isUnknownVoice }).prefix(maxPeople) {
             let projs = p.projectIDs.compactMap { id in projects.first { $0.id == id }?.name }.joined(separator: ", ")
             lines.append("- \(p.name) | \(p.emails.joined(separator: ", ")) | \(p.aliases.joined(separator: ", ")) | \(p.org ?? "") | \(p.role ?? "") | \(projs)")
         }

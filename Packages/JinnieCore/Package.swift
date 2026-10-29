@@ -10,7 +10,9 @@ let package = Package(
         .executable(name: "jinnie", targets: ["jinnie"]),
     ],
     targets: [
-        .target(name: "JinnieCore", linkerSettings: [.linkedLibrary("sqlite3")]),
+        // Objective-C exceptions as errors (AVAudioEngine raises some failures that Swift cannot catch).
+        .target(name: "JinnieObjC"),
+        .target(name: "JinnieCore", dependencies: ["JinnieObjC"], linkerSettings: [.linkedLibrary("sqlite3")]),
         .target(name: "JinnieAgent", dependencies: ["JinnieCore"]),
         .executableTarget(name: "jinnie", dependencies: ["JinnieCore", "JinnieAgent"]),
         .testTarget(name: "JinnieCoreTests", dependencies: ["JinnieCore", "JinnieAgent"]),

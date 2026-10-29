@@ -313,6 +313,33 @@ func tempStore() throws -> Store {
     #expect(store.get(Recording.self, r2.id)!.processedAt == nil)
 }
 
+@Test func unknownVoiceIsKeptRecognisedAndCanBeNamedLater() throws {
+    let store = try tempStore()
+    let dana = store.save(Person(name: "Dana Fischer"))
+    var r1 = Recording(title: "Catch-up"); r1.status = .ready; r1.processedAt = Date()
+    var s = RecordedSpeaker(label: 2); s.embedding = [0, 1, 0.1, 0, 0, 0]; s.talkSeconds = 60
+    r1.speakers = [s]; r1 = store.save(r1)
+    var r2 = Recording(title: "Later"); r2.status = .ready; r2.processedAt = Date()
+    var s2 = RecordedSpeaker(label: 0); s2.embedding = [0, 0.99, 0.12, 0, 0, 0]; s2.talkSeconds = 40
+    r2.speakers = [s2]; r2 = store.save(r2)
+
+    let voice = try #require(store.markUnknownVoice(recordingID: r1.id, label: 2))
+    #expect(voice.name == "Unknown voice 1" && voice.isUnknownVoice)
+    #expect(store.get(Recording.self, r1.id)!.unnamedSpeakers.isEmpty)                  // no longer asked
+    #expect(store.get(Recording.self, r2.id)!.speakers[0].personID == voice.id)          // recognised elsewhere
+    #expect(store.get(Recording.self, r1.id)!.processedAt != nil)                        // and nothing re-read
+    #expect(store.get(Recording.self, r2.id)!.processedAt != nil)
+    #expect(!Directory(store: store).promptText().contains("Unknown voice"))             // not sent to Claude
+    #expect(store.markUnknownVoice(recordingID: r2.id, label: 0)?.name == "Unknown voice 2")
+
+    // Later the owner finds out who it was.
+    store.resolveUnknownVoice(voice.id, as: dana.id)
+    #expect(store.get(Recording.self, r1.id)!.speakers[0].personID == dana.id)
+    #expect(store.get(Recording.self, r1.id)!.processedAt == nil)
+    #expect(store.get(Person.self, voice.id)?.deleted ?? true)
+    #expect(store.get(Person.self, dana.id)!.voiceSamples?.isEmpty == false)
+}
+
 @Test func ownerIsTheVoiceLoudestOnTheMicrophone() {
     let sr = 100.0  // tiny sample rate keeps the test fast
     var mic = [Float](repeating: 0.001, count: 3000), sys = [Float](repeating: 0.001, count: 3000)
@@ -490,4 +517,45 @@ func tempStore() throws -> Store {
     #expect(!Recording.foreignScript("Давай мы его засунем в портфолио", languages: "English and Russian"))
     #expect(!Recording.foreignScript("Revenue Cloud, okay", languages: "English"))
     #expect(Recording.foreignScript("Давай мы его засунем", languages: "English"))
+}
+
+@Test func quickActionSplitsWaitingForPerPerson() {
+    var dana = Person(name: "Dana Fischer"); dana.projectIDs = []
+    let omar = Person(name: "Omar Haddad")
+    var globex = Customer(name: "Globex")
+    globex.aliases = ["Globex Corp"]
+    var migration = Project(name: "Globex Migration"); migration.customerID = globex.id
+    let dir = Directory(people: [dana, omar], projects: [migration], customers: [globex])
+
+    let two = QuickAction.parse("Waiting on Dana and the vendor team for Globex migration tool PoC", in: dir)
+    #expect(two.count == 2)
+    #expect(two.allSatisfy { $0.kind == .waiting && $0.title == "Globex migration tool PoC" && $0.projectID == migration.id })
+    #expect(two[0].personID == dana.id)
+    #expect(two[1].personID == nil && two[1].personName == "the vendor team")
+
+    let next = QuickAction.parse("send Omar the CR draft", in: dir, defaultProjectID: "p1")
+    #expect(next.count == 1 && next[0].kind == .next && next[0].title == "Send Omar the CR draft" && next[0].projectID == "p1")
+
+    let ru = QuickAction.parse("Ждём Омара и Dana по договору Globex", in: dir)
+    #expect(ru.count == 2 && ru[1].personID == dana.id && ru[0].title == "Договору Globex")
+}
+
+@Test func usageLimitResetIsReadFromClaudesMessage() {
+    let msg = "You've hit your weekly limit · resets Oct 31 at 4pm (Australia/Melbourne)"
+    #expect(Claude.isLimitMessage(msg) && ClaudeError(message: "claude: " + msg).isLimit)
+    #expect(!Claude.isLimitMessage("claude exited 1: network error"))
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "Australia/Melbourne")!
+    let now = cal.date(from: DateComponents(year: 2026, month: 10, day: 30, hour: 9, minute: 53))!
+    let reset = Claude.limitReset(in: msg, now: now)
+    #expect(reset == cal.date(from: DateComponents(year: 2026, month: 10, day: 31, hour: 16)))
+    // Time only: later today, or tomorrow if that time has passed.
+    let soon = Claude.limitReset(in: "You've hit your session limit · resets 4:30pm (Australia/Melbourne)", now: now)
+    #expect(soon == cal.date(from: DateComponents(year: 2026, month: 10, day: 30, hour: 16, minute: 30)))
+    #expect(Claude.limitReset(in: "You've hit your limit", now: now) == nil)
+}
+
+@Test func objectiveCExceptionsBecomeErrors() {
+    #expect(throws: (any Error).self) { try catchingObjCExceptions { _ = NSArray().object(at: 1) } }
+    #expect(throws: Never.self) { try catchingObjCExceptions { _ = NSArray(object: 1).object(at: 0) } }
 }

@@ -442,7 +442,13 @@ struct SpeakerRow: View {
                     }
                 }
             }
-            if current != nil { Divider(); Button("Not sure", role: .destructive) { model.assignSpeaker(recording, label: speaker.label, personID: nil) } }
+            Divider()
+            if current == nil {
+                Button("I Don't Know") { model.markUnknownVoice(recording, label: speaker.label) }
+                    .help("Stop asking: Jinnie keeps the voice as an unknown person and recognises it next time")
+            } else {
+                Button("Not sure", role: .destructive) { model.assignSpeaker(recording, label: speaker.label, personID: nil) }
+            }
         }
         .fixedSize()
     }

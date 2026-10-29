@@ -433,6 +433,7 @@ struct ActionRow: View {
     @Environment(AppModel.self) private var model
     let action: Action
     var showProject = true
+    @State private var editing = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -468,9 +469,11 @@ struct ActionRow: View {
             }
             if let url = action.uberdoerURL { Link("Open in Uberdoer", destination: url) }
             Divider()
+            Button { editing = true } label: { Label("Edit…", systemImage: "pencil") }
             Button { Clipboard.copy(action.title) } label: { Label("Copy", systemImage: "doc.on.doc") }
             if let who = model.personName(action) { Button { Clipboard.copy(who) } label: { Label("Copy “\(who)”", systemImage: "person") } }
         }
+        .sheet(isPresented: $editing) { ActionEditor(action: action) }
     }
 
     private var details: some View {
@@ -503,7 +506,7 @@ struct ActionRow: View {
                     }
                     if let item = model.item(action.itemID) { SourceLink(item: item) }
                 }
-                if open { ActionPanel(action: action).padding(.top, 6) }
+                if open { ActionPanel(action: action) { editing = true }.padding(.top, 6) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
@@ -520,6 +523,7 @@ struct ActionPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
     let action: Action
+    var edit: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -546,6 +550,7 @@ struct ActionPanel: View {
                 if let url = action.uberdoerURL {
                     Button { openURL(url) } label: { Label("Uberdoer", systemImage: "checklist") }
                 }
+                Button(action: edit) { Label("Edit", systemImage: "pencil") }
                 NavigationLink(value: Route.action(action.id)) { Label("Details", systemImage: "info.circle") }
             }
             .buttonStyle(.borderless)
@@ -559,6 +564,7 @@ struct ActionDetail: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
     let actionID: String
+    @State private var editing = false
 
     var body: some View {
         if let a = model.actions.first(where: { $0.id == actionID }) {
@@ -616,10 +622,183 @@ struct ActionDetail: View {
                 }
             }
             .navigationTitle(a.title)
+            .toolbar { Button("Edit") { editing = true } }
+            .sheet(isPresented: $editing) { ActionEditor(action: a) }
         } else {
             EmptyHint(title: "Action not found", systemImage: "questionmark")
         }
     }
+}
+
+/// "Add Next Action" / "Add Waiting For" at the end of a list of actions: opens the editor filled in from where it is
+/// (project, person). The new action goes to Uberdoer on the next sync, like the ones Jinnie finds.
+struct AddActionButton: View {
+    var kind: Action.Kind = .next
+    var projectID: String?
+    var personID: String?
+    @State private var adding: Action?
+
+    var body: some View {
+        Button {
+            var a = Action(kind: kind, title: "")
+            a.projectID = projectID
+            a.personID = personID
+            adding = a
+        } label: {
+            Label(kind == .waiting ? "Add Waiting For" : "Add Next Action", systemImage: "plus")
+        }
+        .buttonStyle(.borderless)
+        .sheet(item: $adding) { QuickAddActions(template: $0) }
+    }
+}
+
+/// Add actions by typing them: "Waiting on Dana and the vendor team for the PoC" → one waiting-for per person, in the
+/// project the text names (QuickAction). Shows what will be added; "More Options…" opens the full editor.
+struct QuickAddActions: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let template: Action
+    @State private var text = ""
+    @State private var editing: Action?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let parsed = QuickAction.parse(text, in: model.directory, defaultProjectID: template.projectID, defaultKind: template.kind)
+            .map { a -> Action in
+                var a = a
+                if a.personID == nil && a.personName == nil, let p = template.personID { a.personID = p; a.personName = model.person(p)?.name }
+                return a
+            }
+        NavigationStack {
+            Form {
+                Section {
+                    TextField(template.kind == .waiting ? "Waiting on Dana and Omar for the migration PoC" : "Send Dana the CR draft",
+                              text: $text, axis: .vertical)
+                        .focused($focused)
+                        .onSubmit { add(parsed) }
+                } footer: {
+                    Text("Start with “Waiting on …” for waiting-for; name several people to track each separately. A project or customer named in the text is used.")
+                }
+                if !parsed.isEmpty {
+                    Section(parsed.count == 1 ? "Will add" : "Will add \(parsed.count)") {
+                        ForEach(Array(parsed.enumerated()), id: \.offset) { _, a in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(a.kind == .waiting ? "\(a.personName ?? "?") // \(a.title)" : a.title)
+                                let known = a.personID != nil || a.personName == nil
+                                Text([a.kind == .waiting ? "Waiting for" : "Next action", model.project(a.projectID)?.name ?? "No project",
+                                      known ? nil : "\(a.personName ?? "") isn't in Jinnie yet"].compactMap { $0 }.joined(separator: " · "))
+                                    .font(.caption).foregroundStyle(known ? Color.secondary : Color.orange)
+                            }
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("New Actions")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(parsed.count > 1 ? "Add \(parsed.count)" : "Add") { add(parsed) }.disabled(parsed.isEmpty)
+                }
+                ToolbarItem(placement: .secondaryAction) {
+                    Button("More Options…") { editing = parsed.first ?? template }
+                }
+            }
+            .sheet(item: $editing) { a in
+                ActionEditor(action: a, isNew: true) { dismiss() }
+            }
+            .onAppear { focused = true }
+        }
+        .frame(minWidth: 460, minHeight: 320)
+    }
+
+    func add(_ actions: [Action]) {
+        guard !actions.isEmpty else { return }
+        for a in actions { model.save(a) }
+        AgentHooks.shared?.runNow()
+        dismiss()
+    }
+}
+
+/// Correct an action: what, next or waiting, who, project, due date, context. Saved in Jinnie and pushed to its Uberdoer
+/// task on the next sync.
+struct ActionEditor: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State var action: Action
+    var isNew = false
+    var onSaved: () -> Void = {}
+    @State private var hasDue = false
+    @State private var due = Date()
+    @State private var context = ""
+    @State private var choosingPerson = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Picker("Kind", selection: $action.kind) {
+                    Text("Next action").tag(Action.Kind.next)
+                    Text("Waiting for").tag(Action.Kind.waiting)
+                }
+                .pickerStyle(.segmented)
+                TextField("What", text: $action.title, axis: .vertical)
+                LabeledContent(action.kind == .waiting ? "Waiting on" : "With") {
+                    HStack {
+                        Text(model.person(action.personID)?.name ?? action.personName ?? "Nobody").foregroundStyle(.secondary)
+                        Button("Change…") { choosingPerson = true }
+                        if action.personID != nil || action.personName != nil {
+                            Button("Clear") { action.personID = nil; action.personName = nil }
+                        }
+                    }
+                }
+                Picker("Project", selection: $action.projectID) {
+                    Text("None").tag(String?.none)
+                    ForEach(model.projects.filter { $0.status != .done || $0.id == action.projectID }) { Text($0.name).tag(Optional($0.id)) }
+                }
+                Toggle("Due date", isOn: $hasDue)
+                if hasDue { DatePicker("Due", selection: $due, displayedComponents: .date) }
+                TextField("Context", text: $context, axis: .vertical)
+            }
+            .formStyle(.grouped)
+            .navigationTitle(isNew ? "New Action" : "Edit Action")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        action.title = action.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                        action.due = hasDue ? Self.day.string(from: due) : nil
+                        let c = context.trimmingCharacters(in: .whitespacesAndNewlines)
+                        action.context = c.isEmpty ? nil : c
+                        if !isNew { action.needsEditPush = true }
+                        if let p = action.personID { action.personName = model.person(p)?.name }
+                        model.save(action)
+                        AgentHooks.shared?.runNow()
+                        dismiss()
+                        onSaved()
+                    }
+                    .disabled(action.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .sheet(isPresented: $choosingPerson) {
+                PersonPicker(title: action.kind == .waiting ? "Waiting on" : "With") { id in
+                    action.personID = id
+                    action.personName = model.person(id)?.name
+                    choosingPerson = false
+                } onCancel: { choosingPerson = false }
+            }
+            .onAppear {
+                context = action.context ?? ""
+                if let d = action.due.flatMap({ Self.day.date(from: $0) }) { hasDue = true; due = d }
+            }
+        }
+        .frame(minWidth: 420, minHeight: 420)
+    }
+
+    static let day: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
 }
 
 /// Uberdoer's completion circle: a thin ring (red when overdue) that fills with a small check when done.
@@ -841,5 +1020,37 @@ struct FlowLayout: Layout {
         }
         if !row.indices.isEmpty { rows.append(row) }
         return rows
+    }
+}
+
+/// Tabs at the top of a page (Today, Customers): one list at a time instead of a long page of collapsible panels.
+/// Wraps onto a second line when they don't fit (iPhone). Not a sideways ScrollView: iOS took it for the page's scroll
+/// view and hid it under the navigation bar.
+struct TabStrip<Tab: Hashable & Identifiable>: View {
+    let tabs: [Tab]
+    @Binding var selection: Tab
+    let title: (Tab) -> String
+    var count: (Tab) -> Int = { _ in 0 }
+
+    var body: some View {
+        FlowLayout(spacing: 6) {
+            ForEach(tabs) { t in
+                let on = t == selection, n = count(t)
+                Button { selection = t } label: {
+                    HStack(spacing: 5) {
+                        Text(title(t))
+                        if n > 0 { Text("\(n)").monospacedDigit().foregroundStyle(on ? Color.white.opacity(0.85) : Color.secondary) }
+                    }
+                    .font(.callout.weight(on ? .semibold : .regular))
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .foregroundStyle(on ? Color.white : Color.primary)
+                    .background(Capsule().fill(on ? Color.accentColor : Color.secondary.opacity(0.12)))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal).padding(.vertical, 8)
     }
 }
